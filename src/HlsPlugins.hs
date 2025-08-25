@@ -131,6 +131,8 @@ import qualified Development.IDE.Plugin.CodeAction as Refactor
 import qualified Ide.Plugin.SemanticTokens         as SemanticTokens
 #endif
 
+import qualified Ide.Plugin.MassRename   as MassRename
+
 
 data Log = forall a. (Pretty a) => Log PluginId a
 
@@ -248,5 +250,6 @@ idePlugins recorder = pluginDescToIdePlugins allPlugins
 #if hls_notes
       let pId = "notes" in Notes.descriptor (pluginRecorder pId) pId :
 #endif
+      let pId = "mass-rename" in MassRename.descriptor (pluginRecorder pId) pId :
       GhcIde.descriptors (pluginRecorder "ghcide")
 

@@ -613,7 +613,6 @@ library hls-rename-plugin
     , transformers
     , unordered-containers
 
-
 test-suite hls-rename-plugin-tests
   import:           defaults, pedantic, test-defaults, warnings
   if !flag(rename)
@@ -631,6 +630,31 @@ test-suite hls-rename-plugin-tests
     , lens
     , lsp-types
     , text
+
+library hls-mass-rename-plugin
+  import:           defaults, pedantic, warnings
+  if !flag(rename)
+    buildable: False
+  exposed-modules:  Ide.Plugin.MassRename
+  hs-source-dirs:   plugins/hls-mass-rename-plugin/src
+  build-depends:
+    , containers
+    , ghc
+    , ghcide                == 2.11.0.0
+    , hashable
+    , hiedb                 ^>= 0.7.0.0
+    , hls-plugin-api        == 2.11.0.0
+    , haskell-language-server:hls-refactor-plugin
+    , lens
+    , lsp-types
+    , mtl
+    , mod
+    , syb
+    , text
+    , transformers
+    , unordered-containers
+    , optparse-applicative
+
 
 -----------------------------
 -- retrie plugin
@@ -1901,6 +1925,7 @@ library
     , prettyprinter         >= 1.7
     , process
     , text
+    , haskell-language-server:hls-mass-rename-plugin
 
   default-extensions: DataKinds
 
