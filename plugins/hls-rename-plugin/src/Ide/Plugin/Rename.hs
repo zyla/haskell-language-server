@@ -6,7 +6,7 @@
 {-# LANGUAGE RecordWildCards   #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Ide.Plugin.Rename (descriptor, E.Log) where
+module Ide.Plugin.Rename (descriptor, E.Log, refsAtName, replaceRefs) where
 
 import           Control.Lens                          ((^.))
 import           Control.Monad
@@ -202,7 +202,7 @@ refsAtName state nfp name = do
         Nothing -> pure []
         Just mod -> liftIO $ mapMaybe rowToLoc <$> withHieDb (\hieDb ->
             -- See Note [Generated references]
-            filter (\(refRow HieDb.:. _) -> refIsGenerated refRow) <$>
+--            filter (\(refRow HieDb.:. _) -> refIsGenerated refRow) <$>
             findReferences
                 hieDb
                 True

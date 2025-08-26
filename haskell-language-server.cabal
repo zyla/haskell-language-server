@@ -645,6 +645,7 @@ library hls-mass-rename-plugin
     , hiedb                 ^>= 0.7.0.0
     , hls-plugin-api        == 2.11.0.0
     , haskell-language-server:hls-refactor-plugin
+    , haskell-language-server:hls-rename-plugin
     , lens
     , lsp-types
     , mtl

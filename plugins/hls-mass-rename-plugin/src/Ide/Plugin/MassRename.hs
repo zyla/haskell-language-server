@@ -7,6 +7,7 @@
 
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Ide.Plugin.MassRename (descriptor, E.Log) where
 
@@ -19,6 +20,7 @@ import           Development.IDE.Core.Shake
 import qualified Development.IDE.GHC.ExactPrint        as E
 import           Development.IDE.Plugin.CodeAction
 import           Development.IDE.Types.Location
+import qualified Ide.Plugin.Rename as Rename
 import           Ide.Types
 import           Options.Applicative
 import qualified System.Directory.Extra                   as IO
@@ -28,7 +30,16 @@ import           Data.List.Extra                          (isPrefixOf, nubOrd,
 import           System.FilePath                          (takeExtension,
                                                            takeFileName)
 import qualified Development.IDE.GHC.Compat as GHC
-import Debug.Trace
+-- import Debug.Trace
+import Control.Monad.Except (runExceptT)
+import Data.Either (fromRight)
+import Data.List (sort)
+import Ide.Plugin.Error (getNormalizedFilePathE)
+import Control.Monad.IO.Class (liftIO)
+import Development.IDE.Core.PluginUtils (runActionE, useE)
+
+-- import qualified Data.HashMap.Strict as HashMap
+-- import Development.IDE.Core.OfInterest (setFilesOfInterest)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -48,17 +59,27 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         absoluteFiles <- nubOrd <$> mapM IO.canonicalizePath files
         putStrLn $ "Found " ++ show (length absoluteFiles) ++ " files"
 
-        -- TODO: is this necessary?
-        --setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
+        -- Is this necessary?
+        -- Without this we get warnings when typechecking
+        -- But with this, HLS does a lot of stuff and slows down
+        -- setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
 
         results <- runAction "GetModIface" ide $ uses GetModIface (map toNormalizedFilePath' absoluteFiles)
-        let (_, failed) = partition fst $ zip (map isJust results) absoluteFiles
-        when (failed /= []) $
+        let (succeeded, failed) = partition (isJust . fst) $ zip results absoluteFiles
+        unless (null failed) $
             putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
 
-        forM_ (catMaybes results) \mod ->
-            forM_ (findTypesToRefactor mod) \tr -> do
-                putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
+        fmap (fromRight (error "plugin error")) $ runExceptT $ forM_ succeeded $ \case
+            (Just mod, fp) ->
+                forM_ (findTypesToRefactor mod) \tr -> do
+                    liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
+                    refs <- concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
+                    forM_ (sort $ nubOrd refs) \loc -> do
+                        nfp <- getNormalizedFilePathE loc._uri
+                        (_, fileContents) <- runActionE "GetFileContents" ide $ useE GetFileContents nfp
+                        liftIO $ putStrLn $ "  " <> show loc._uri
+                        liftIO $ putStrLn $ "  " <> show fileContents
+            _ -> pure ()
 
 data TypeToRefactor = TypeToRefactor
     { module_ :: GHC.ModuleName
