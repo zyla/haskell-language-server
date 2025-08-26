@@ -654,6 +654,8 @@ library hls-mass-rename-plugin
     , transformers
     , unordered-containers
     , optparse-applicative
+    , extra
+    , filepath
 
 
 -----------------------------

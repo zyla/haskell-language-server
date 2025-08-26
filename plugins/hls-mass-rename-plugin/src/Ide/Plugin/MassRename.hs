@@ -1,63 +1,32 @@
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE DataKinds         #-}
 {-# LANGUAGE GADTs             #-}
-{-# LANGUAGE OverloadedLabels  #-}
+
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Ide.Plugin.MassRename (descriptor, E.Log) where
 
-import           Control.Lens                          ((^.))
 import           Control.Monad
-import           Control.Monad.Except                  (ExceptT, throwError)
-import           Control.Monad.IO.Class                (MonadIO, liftIO)
-import           Control.Monad.Trans.Class             (lift)
-import           Data.Either                           (rights)
-import           Data.Foldable                         (fold)
-import           Data.Generics
-import           Data.Hashable
-import           Data.HashSet                          (HashSet)
-import qualified Data.HashSet                          as HS
-import           Data.List.NonEmpty                    (NonEmpty ((:|)),
-                                                        groupWith)
-import qualified Data.Map                              as M
 import           Data.Maybe
-import           Data.Mod.Word
-import qualified Data.Text                             as T
-import           Development.IDE                       (Recorder, WithPriority,
-                                                        usePropertyAction)
-import           Development.IDE.Core.FileStore        (getVersionedTextDoc)
-import           Development.IDE.Core.PluginUtils
+import           Development.IDE                       (Recorder, WithPriority)
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Service
 import           Development.IDE.Core.Shake
-import           Development.IDE.GHC.Compat
-import           Development.IDE.GHC.Compat.ExactPrint
-import           Development.IDE.GHC.Error
-import           Development.IDE.GHC.ExactPrint
 import qualified Development.IDE.GHC.ExactPrint        as E
 import           Development.IDE.Plugin.CodeAction
-import           Development.IDE.Spans.AtPoint
 import           Development.IDE.Types.Location
-import           GHC.Iface.Ext.Types                   (HieAST (..),
-                                                        HieASTs (..),
-                                                        NodeOrigin (..),
-                                                        SourcedNodeInfo (..))
-import           GHC.Iface.Ext.Utils                   (generateReferencesMap)
-import           HieDb                                 ((:.) (..))
-import           HieDb.Query
-import           HieDb.Types                           (RefRow (refIsGenerated))
-import           Ide.Plugin.Error
-import           Ide.Plugin.Properties
-import           Ide.PluginUtils
 import           Ide.Types
-import qualified Language.LSP.Protocol.Lens            as L
-import           Language.LSP.Protocol.Message
-import           Language.LSP.Protocol.Types
-import           Options.Applicative        (ParserInfo, info)
-
-instance Hashable (Mod a) where hash n = hash (unMod n)
+import           Options.Applicative
+import           Development.IDE.Core.OfInterest          (setFilesOfInterest)
+import qualified Data.HashMap.Strict                      as HashMap
+import qualified System.Directory.Extra                   as IO
+import           Control.Monad.Extra                      (concatMapM)
+import           Data.List.Extra                          (isPrefixOf, nubOrd,
+                                                           partition)
+import           System.FilePath                          (takeExtension,
+                                                           takeFileName)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -67,5 +36,38 @@ descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
 
 
 exampleCli :: ParserInfo (IdeCommand IdeState)
-exampleCli = info p mempty
-  where p = pure $ IdeCommand $ \_ideState -> putStrLn "hello HLS"
+exampleCli = info (IdeCommand . go <$> fileArg) mempty
+  where
+
+  fileArg = many (argument str (metavar "FILES/DIRS..."))
+  go argFiles ide = do
+            files <- expandFiles (argFiles ++ ["." | null argFiles])
+            -- LSP works with absolute file paths, so try and behave similarly
+            absoluteFiles <- nubOrd <$> mapM IO.canonicalizePath files
+            putStrLn $ "Found " ++ show (length absoluteFiles) ++ " files"
+
+            putStrLn "\nStep 4/4: Type checking the files"
+            setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
+            results <- runAction "User TypeCheck" ide $ uses TypeCheck (map toNormalizedFilePath' absoluteFiles)
+            _results <- runAction "GetHie" ide $ uses GetHieAst (map toNormalizedFilePath' absoluteFiles)
+            _results <- runAction "GenerateCore" ide $ uses GenerateCore (map toNormalizedFilePath' absoluteFiles)
+            let (worked, failed) = partition fst $ zip (map isJust results) absoluteFiles
+            when (failed /= []) $
+                putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
+
+            let nfiles xs = let n' = length xs in if n' == 1 then "1 file" else show n' ++ " files"
+            putStrLn $ "\nCompleted (" ++ nfiles worked ++ " worked, " ++ nfiles failed ++ " failed)"
+
+expandFiles :: [FilePath] -> IO [FilePath]
+expandFiles = concatMapM $ \x -> do
+    b <- IO.doesFileExist x
+    if b
+        then return [x]
+        else do
+            let recurse "." = True
+                recurse y | "." `isPrefixOf` takeFileName y = False -- skip .git etc
+                recurse y = takeFileName y `notElem` ["dist", "dist-newstyle"] -- cabal directories
+            files <- filter (\y -> takeExtension y `elem` [".hs", ".lhs"]) <$> IO.listFilesInside (return . recurse) x
+            when (null files) $
+                fail $ "Couldn't find any .hs/.lhs files inside directory: " ++ x
+            return files
