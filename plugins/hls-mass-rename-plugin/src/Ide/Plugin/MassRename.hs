@@ -6,7 +6,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 
 {-# OPTIONS_GHC -Wno-orphans #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE BlockArguments #-}
 
 module Ide.Plugin.MassRename (descriptor, E.Log) where
@@ -25,11 +24,11 @@ import           Options.Applicative
 import qualified System.Directory.Extra                   as IO
 import           Control.Monad.Extra                      (concatMapM)
 import           Data.List.Extra                          (isPrefixOf, nubOrd,
-                                                           partition)
+                                                           partition, split)
 import           System.FilePath                          (takeExtension,
                                                            takeFileName)
 import qualified Development.IDE.GHC.Compat as GHC
-import GHC.Types.SrcLoc (unLoc)
+import Debug.Trace
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -52,7 +51,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         -- TODO: is this necessary?
         --setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
 
-        results <- runAction "GetParsedModule" ide $ uses GetParsedModule (map toNormalizedFilePath' absoluteFiles)
+        results <- runAction "GetModIface" ide $ uses GetModIface (map toNormalizedFilePath' absoluteFiles)
         let (_, failed) = partition fst $ zip (map isJust results) absoluteFiles
         when (failed /= []) $
             putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
@@ -62,35 +61,38 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
 
 data TypeToRefactor = TypeToRefactor
-    { declaration :: GHC.TyClDecl GHC.GhcPs
-    , module_ :: GHC.ModuleName
-    , name :: GHC.RdrName
-    , fieldNames :: [GHC.RdrName]
+    { module_ :: GHC.ModuleName
+    , name :: GHC.Name
+    , fieldNames :: [GHC.Name]
     }
 
-findTypesToRefactor :: GHC.ParsedModule -> [TypeToRefactor]
-findTypesToRefactor GHC.ParsedModule{GHC.pm_parsed_source=(unLoc -> mod)} =
-    flip mapMaybe (GHC.hsmodDecls mod) \decl ->
-        case unLoc decl of
-            GHC.TyClD _ decl@(GHC.DataDecl{ GHC.tcdLName = unLoc -> nm, GHC.tcdDataDefn = GHC.HsDataDefn { GHC.dd_cons = GHC.DataTypeCons _ constructors } }) -> do
-                let fieldNames = concatMap (getFieldNames . unLoc) constructors
-                    getFieldNames GHC.ConDeclH98 { GHC.con_args = GHC.RecCon (unLoc -> fields) } =
-                        concatMap (map (GHC.unLoc . GHC.foLabel . unLoc) . GHC.cd_fld_names . unLoc) fields
-                    getFieldNames _ = [] -- GADTs not supported
+findTypesToRefactor :: HiFileResult -> [TypeToRefactor]
+findTypesToRefactor HiFileResult{hirModIface=modIface} =
+    flip mapMaybe (GHC.mi_decls modIface) \decl ->
+        case snd decl of
+            GHC.IfaceData { GHC.ifName = nm, GHC.ifCons = GHC.IfDataTyCon _ constructors } -> do
+                let fieldNames = concatMap getFieldNames constructors
+                    getFieldNames = map GHC.flSelector . GHC.ifConFields
+
                 let hasLensPrefix fieldName =
-                        case GHC.occNameString (GHC.rdrNameOcc fieldName) of
+                        case fieldNameToString fieldName of
                             '_' : _ -> True
                             _ -> False
+                --traceM $ show $ nameToString <$> fieldNames
                 guard (not $ null fieldNames)
                 guard (all hasLensPrefix fieldNames)
                 pure TypeToRefactor
-                    { declaration = decl
-                    , module_ = unLoc $ fromMaybe (error "c'mon, module with no name?") $ GHC.hsmodName mod
+                    { module_ = GHC.moduleName $ GHC.mi_module modIface
                     , name = nm
                     , fieldNames
                     }
             _ -> Nothing
 
+fieldNameToString :: GHC.Name -> String
+fieldNameToString n =
+    case split (==':') $ GHC.occNameString $ GHC.nameOccName n of
+        ["$sel", fieldName, _] -> fieldName
+        xs -> error $ "unexpected field name: " <> show xs
 
 expandFiles :: [FilePath] -> IO [FilePath]
 expandFiles = concatMapM $ \x -> do
