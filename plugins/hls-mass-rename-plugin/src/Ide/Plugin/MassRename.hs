@@ -13,7 +13,7 @@ module Ide.Plugin.MassRename (descriptor, E.Log) where
 
 import           Control.Monad
 import           Data.Maybe
-import           Development.IDE                       (Recorder, WithPriority)
+import           Development.IDE                       (Recorder, WithPriority, pretty)
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Service
 import           Development.IDE.Core.Shake
@@ -37,6 +37,7 @@ import Data.List (sort)
 import Ide.Plugin.Error (getNormalizedFilePathE)
 import Control.Monad.IO.Class (liftIO)
 import Development.IDE.Core.PluginUtils (runActionE, useE)
+import qualified Data.Text as Text
 
 -- import qualified Data.HashMap.Strict as HashMap
 -- import Development.IDE.Core.OfInterest (setFilesOfInterest)
@@ -60,7 +61,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         putStrLn $ "Found " ++ show (length absoluteFiles) ++ " files"
 
         -- Is this necessary?
-        -- Without this we get warnings when typechecking
+        -- Without this we get warnings when typechecking ("Typechecked a file which is not currently open in the editor")
         -- But with this, HLS does a lot of stuff and slows down
         -- setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
 
@@ -74,12 +75,19 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 forM_ (findTypesToRefactor mod) \tr -> do
                     liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
                     refs <- concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
-                    forM_ (sort $ nubOrd refs) \loc -> do
+                    forM_ (withPrevious $ sort $ nubOrd refs) \(prev, loc) -> do
                         nfp <- getNormalizedFilePathE loc._uri
-                        (_, fileContents) <- runActionE "GetFileContents" ide $ useE GetFileContents nfp
-                        liftIO $ putStrLn $ "  " <> show loc._uri
-                        liftIO $ putStrLn $ "  " <> show fileContents
+                        when (toNormalizedFilePath' fp /= nfp) do
+                            fileContents <- liftIO $ readFile (fromNormalizedFilePath nfp)
+                            when (Just loc._uri /= ((._uri) <$> prev)) do
+                                liftIO $ putStrLn $ "  " <> Text.unpack (getUri loc._uri)
+                            liftIO $ putStrLn $ "  " <> (lines fileContents !! fromIntegral loc._range._start._line)
+                            liftIO $ putStrLn $ "  " <> replicate (fromIntegral loc._range._start._character) ' '
+                                    <> replicate (fromIntegral (loc._range._end._character - loc._range._start._character)) '^'
             _ -> pure ()
+
+withPrevious :: [a] -> [(Maybe a, a)]
+withPrevious xs = zip (Nothing : map Just xs) xs
 
 data TypeToRefactor = TypeToRefactor
     { module_ :: GHC.ModuleName
