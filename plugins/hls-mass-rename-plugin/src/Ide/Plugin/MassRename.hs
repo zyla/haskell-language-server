@@ -63,6 +63,7 @@ import Development.IDE.GHC.Compat (SrcSpan)
 import Development.IDE.GHC.Error (srcSpanToLocation)
 import Debug.Trace
 import qualified Data.List as List
+import qualified Development.IDE.Spans.LocalBindings as LocalBindings
 
 -- import qualified Data.HashMap.Strict as HashMap
 -- import Development.IDE.Core.OfInterest (setFilesOfInterest)
@@ -150,13 +151,18 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
 ppLoc :: Location -> String
 ppLoc loc = show loc._range._start._line <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
 
+ppLocWithFileName :: Location -> String
+ppLocWithFileName loc = (T.unpack $ T.intercalate "/" $ untilSrc $ T.splitOn "/" $ getUri loc._uri) <> ":" <> show loc._range._start._line <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
+    where untilSrc = dropWhile (/= "src")
+
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::
     (OccName -> OccName) ->
     HashSet Location ->
+    LocalBindings.Bindings ->
     ParsedSource ->
     ParsedSource
-replaceRefs newName refs = everywhere $
+replaceRefs newName refs lb = everywhere $
     -- there has to be a better way...
     mkT (replaceLoc @AnnListItem) `extT`
     -- replaceLoc @AnnList `extT` -- not needed
@@ -171,11 +177,18 @@ replaceRefs newName refs = everywhere $
 --           <> " -> " <> show (isRef (GHC.locA srcSpan))) False = undefined
         replaceLoc (L srcSpan oldRdrName)
             | isRef (GHC.locA srcSpan) =
-                L srcSpan $ replace oldRdrName
+                let newName' = newName (GHC.rdrNameOcc oldRdrName)
+                    !_ | GHC.RealSrcSpan realSpan _ <- GHC.locA srcSpan
+                       , scope <- fst <$> LocalBindings.getLocalScope lb realSpan
+                       , conflicts <- filter ((== GHC.occNameFS newName') . GHC.occNameFS . GHC.nameOccName) scope
+                       , not (null conflicts)
+                       = trace ("CONFLICT: " <> GHC.printWithoutUniques conflicts <> " at " <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan))) ()
+                       | otherwise = ()
+                in L srcSpan $ replace oldRdrName newName'
         replaceLoc lOldRdrName = lOldRdrName
-        replace :: GHC.RdrName -> GHC.RdrName
-        replace nm@(GHC.Qual modName _) = GHC.Qual modName (newName (GHC.rdrNameOcc nm))
-        replace nm                = GHC.Unqual (newName (GHC.rdrNameOcc nm))
+        replace :: GHC.RdrName -> GHC.OccName -> GHC.RdrName
+        replace (GHC.Qual modName _) newName' = GHC.Qual modName newName'
+        replace _                    newName' = GHC.Unqual newName'
 
         isRef :: GHC.SrcSpan -> Bool
         isRef = (`HS.member` refs) . unsafeSrcSpanToLoc
@@ -197,19 +210,25 @@ data FileEdit = FileEdit
 
 -- Nicked from Rename plugin, but we're not using WorkspaceEdit since we're not
 -- in a LSP environment.
+-- We also provide local Bindings to the callback.
 getSrcEdit ::
     MonadIO m =>
     IdeState ->
     Uri ->
-    (ParsedSource -> ParsedSource) ->
+    (LocalBindings.Bindings -> ParsedSource -> ParsedSource) ->
     ExceptT PluginError m FileEdit
 getSrcEdit state uri updatePs = do
     nfp <- getNormalizedFilePathE uri
     annAst <- runActionE "Rename.GetAnnotatedParsedSource" state
         (useE GetAnnotatedParsedSource nfp)
+    HAR{refMap=originalRefMap, hieKind} <- runActionE "Rename.GetHieAst" state $ useE GetHieAst nfp
+    let refMap =
+            case hieKind of
+                HieFromDisk{} -> [] <$ originalRefMap
+                HieFresh{} -> originalRefMap
     let ps = annAst
         src = T.pack $ exactPrint ps
-        res = T.pack $ exactPrint (updatePs ps)
+        res = T.pack $ exactPrint (updatePs (LocalBindings.bindings refMap) ps)
     pure $ FileEdit
         { uri = uri
         , before = src
