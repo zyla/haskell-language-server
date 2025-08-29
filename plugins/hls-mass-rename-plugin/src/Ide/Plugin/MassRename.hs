@@ -8,6 +8,9 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Avoid restricted function" #-}
+{-# HLINT ignore "Use fewer imports" #-}
 
 module Ide.Plugin.MassRename (descriptor, E.Log) where
 
@@ -26,7 +29,7 @@ import           Options.Applicative
 import qualified System.Directory.Extra                   as IO
 import           Control.Monad.Extra                      (concatMapM)
 import           Data.List.Extra                          (isPrefixOf, nubOrd,
-                                                           partition, split)
+                                                           partition, split, sort)
 import           System.FilePath                          (takeExtension,
                                                            takeFileName)
 import qualified Development.IDE.GHC.Compat as GHC
@@ -36,14 +39,13 @@ import Data.Either (fromRight)
 import Ide.Plugin.Error (getNormalizedFilePathE, PluginError)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Development.IDE.Core.PluginUtils (runActionE, useE)
-import Development.IDE.GHC.Compat (ParsedSource)
+import Development.IDE.GHC.Compat (ParsedSource, NameAnn)
 import Data.Text (Text)
 import Development.IDE.GHC.Compat.Core (mkTcOcc)
 import qualified Data.Text as T
 import Data.Hashable (Hashable)
 import Data.HashSet (HashSet)
 import Data.List.NonEmpty (NonEmpty(..))
-import Ide.Plugin.Rename (replaceRefs)
 import qualified Data.HashSet as HS
 import Data.List.NonEmpty.Extra (groupWith)
 import Development.IDE.GHC.ExactPrint (GetAnnotatedParsedSource(..))
@@ -51,6 +53,16 @@ import Development.IDE.GHC.Compat.ExactPrint (exactPrint)
 import Data.Algorithm.DiffContext (getContextDiff, prettyContextDiff)
 
 import qualified Text.PrettyPrint.HughesPJ as P
+import Development.IDE.GHC.Compat (OccName)
+import Development.IDE.GHC.Compat (AnnListItem)
+import Development.IDE.GHC.Compat (GenLocated(L))
+import Generics.SYB (mkT)
+import Data.Generics (everywhere)
+import Generics.SYB (extT)
+import Development.IDE.GHC.Compat (SrcSpan)
+import Development.IDE.GHC.Error (srcSpanToLocation)
+import Debug.Trace
+import qualified Data.List as List
 
 -- import qualified Data.HashMap.Strict as HashMap
 -- import Development.IDE.Core.OfInterest (setFilesOfInterest)
@@ -90,33 +102,74 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                         liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
                         concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
                 _ -> pure []
-            --
+
+
+            forM_ (withPrevious $ sort $ nubOrd refs) \(prev, loc) -> do
+                nfp <- getNormalizedFilePathE loc._uri
+                fileContents <- liftIO $ readFile (fromNormalizedFilePath nfp)
+                when (Just loc._uri /= ((._uri) <$> prev)) do
+                    liftIO $ putStrLn $ "  " <> T.unpack (getUri loc._uri)
+                liftIO $ putStrLn $ "  " <> (lines fileContents !! fromIntegral loc._range._start._line)
+                liftIO $ putStrLn $ "  " <> replicate (fromIntegral loc._range._start._character) ' '
+                        <> replicate (fromIntegral (loc._range._end._character - loc._range._start._character)) '^'
+
             -- Perform rename
-            let newName = mkTcOcc "todo_new_name"
+            let newName old = mkTcOcc $ stripLensPrefix $ GHC.occNameString old
+                stripLensPrefix ('_':xs) = xs
+                stripLensPrefix xs = xs
                 filesRefs = collectWith (._uri) $ HS.fromList refs
                 getFileEdit (uri, locations) = do
-                    getSrcEdit ide uri (replaceRefs newName locations)
+                    liftIO $ putStrLn $ T.unpack $ getUri uri
+                    liftIO $ putStrLn $ show $ ppLoc <$> HS.toList locations
+                    !x <- getSrcEdit ide uri (replaceRefs newName locations)
+                    pure x
             fileEdits <- mapM getFileEdit filesRefs
 
             forM_ fileEdits \edit -> do
                 liftIO $ print $ prettyContextDiff (P.text $ T.unpack $ getUri edit.uri) (P.text $ T.unpack $ getUri edit.uri) (P.text . T.unpack) $
                     getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
 
+ppLoc :: Location -> String
+ppLoc loc = show loc._range._start._line <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
 
-{-
-                    forM_ (withPrevious $ sort $ nubOrd refs) \(prev, loc) -> do
-                        nfp <- getNormalizedFilePathE loc._uri
-                        when (toNormalizedFilePath' fp /= nfp) do
-                            fileContents <- liftIO $ readFile (fromNormalizedFilePath nfp)
-                            when (Just loc._uri /= ((._uri) <$> prev)) do
-                                liftIO $ putStrLn $ "  " <> Text.unpack (getUri loc._uri)
-                            liftIO $ putStrLn $ "  " <> (lines fileContents !! fromIntegral loc._range._start._line)
-                            liftIO $ putStrLn $ "  " <> replicate (fromIntegral loc._range._start._character) ' '
-                                    <> replicate (fromIntegral (loc._range._end._character - loc._range._start._character)) '^'
-                                    -}
+-- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
+replaceRefs ::
+    (OccName -> OccName) ->
+    HashSet Location ->
+    ParsedSource ->
+    ParsedSource
+replaceRefs newName refs = everywhere $
+    -- there has to be a better way...
+    mkT (replaceLoc @AnnListItem) `extT`
+    -- replaceLoc @AnnList `extT` -- not needed
+    -- replaceLoc @AnnParen `extT` -- not needed
+    -- replaceLoc @AnnPragma `extT` -- not needed
+    -- replaceLoc @AnnContext `extT` -- not needed
+    -- replaceLoc @NoEpAnns `extT` -- not needed
+    replaceLoc @NameAnn
+    where
+        replaceLoc :: forall an. GHC.LocatedAn an GHC.RdrName -> GHC.LocatedAn an GHC.RdrName
+--       replaceLoc (L srcSpan oldRdrName) | trace ("replace? " <> GHC.occNameString (GHC.rdrNameOcc oldRdrName)
+--           <> " -> " <> show (isRef (GHC.locA srcSpan))) False = undefined
+        replaceLoc (L srcSpan oldRdrName)
+            | isRef (GHC.locA srcSpan) =
+                L srcSpan $ replace oldRdrName
+        replaceLoc lOldRdrName = lOldRdrName
+        replace :: GHC.RdrName -> GHC.RdrName
+        replace nm@(GHC.Qual modName _) = GHC.Qual modName (newName (GHC.rdrNameOcc nm))
+        replace nm                = GHC.Unqual (newName (GHC.rdrNameOcc nm))
 
-collectWith :: (Hashable a, Eq b) => (a -> b) -> HashSet a -> [(b, HashSet a)]
-collectWith f = map (\(a :| as) -> (f a, HS.fromList (a:as))) . groupWith f . HS.toList
+        isRef :: GHC.SrcSpan -> Bool
+        isRef = (`HS.member` refs) . unsafeSrcSpanToLoc
+
+unsafeSrcSpanToLoc :: SrcSpan -> Location
+unsafeSrcSpanToLoc srcSpan =
+    case srcSpanToLocation srcSpan of
+        Nothing       -> error "Invalid conversion from UnhelpfulSpan to Location"
+        Just location -> location
+
+collectWith :: (Hashable a, Ord b) => (a -> b) -> HashSet a -> [(b, HashSet a)]
+collectWith f = map (\(a :| as) -> (f a, HS.fromList (a:as))) . groupWith f . List.sortOn f . HS.toList
 
 data FileEdit = FileEdit
     { uri :: Uri
@@ -145,8 +198,8 @@ getSrcEdit state uri updatePs = do
         , after = res
         }
 
--- withPrevious :: [a] -> [(Maybe a, a)]
--- withPrevious xs = zip (Nothing : map Just xs) xs
+withPrevious :: [a] -> [(Maybe a, a)]
+withPrevious xs = zip (Nothing : map Just xs) xs
 
 data TypeToRefactor = TypeToRefactor
     { module_ :: GHC.ModuleName
