@@ -65,8 +65,8 @@ import Debug.Trace
 import qualified Data.List as List
 import qualified Development.IDE.Spans.LocalBindings as LocalBindings
 
--- import qualified Data.HashMap.Strict as HashMap
--- import Development.IDE.Core.OfInterest (setFilesOfInterest)
+import qualified Data.HashMap.Strict as HashMap
+import Development.IDE.Core.OfInterest (setFilesOfInterest)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -89,7 +89,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         -- Is this necessary?
         -- Without this we get warnings when typechecking ("Typechecked a file which is not currently open in the editor")
         -- But with this, HLS does a lot of stuff and slows down
-        -- setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
+        setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
 
         results <- runAction "GetModIface" ide $ uses GetModIface (map toNormalizedFilePath' absoluteFiles)
         let (succeeded, failed) = partition (isJust . fst) $ zip results absoluteFiles
