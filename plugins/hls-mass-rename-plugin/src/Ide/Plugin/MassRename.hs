@@ -95,16 +95,34 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         unless (null failed) $
             putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
 
+        let state = ide
+
         fmap (fromRight (error "plugin error")) $ runExceptT $ do
-            refs <- fmap concat $ forM succeeded $ \case
+            directOldNames <- fmap concat $ forM succeeded $ \case
                 (Just mod, fp) ->
                     fmap concat $ forM (findTypesToRefactor mod) \tr -> do
                         liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
-                        concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
+                        pure $ (toNormalizedFilePath' fp,) <$> tr.fieldNames
                 _ -> pure []
 
+            directRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) directOldNames
 
-            forM_ (withPrevious $ sort $ nubOrd refs) \(prev, loc) -> do
+            {- References in HieDB are not necessarily transitive. With `NamedFieldPuns`, we can have
+                indirect references through punned names. To find the transitive closure, we do a pass of
+                the direct references to find the references for any punned names.
+                See the `IndirectPuns` test for an example. -}
+            indirectOldNames <- concat . filter ((>1) . length) <$>
+                forM directRefs \ref -> do
+                    (nfp, pos) <- Rename.locToFilePos ref
+                    fmap (nfp,) <$> Rename.getNamesAtPos state nfp pos
+            let oldNames = filter matchesDirect indirectOldNames ++ directOldNames
+                   where
+                     matchesDirect (_, n) = GHC.occNameFS (GHC.nameOccName n) `elem` directFS
+                     directFS = map (GHC.occNameFS . GHC.nameOccName . snd) directOldNames
+
+            refs <- HS.fromList . concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) oldNames
+
+            forM_ (withPrevious $ sort $ HS.toList refs) \(prev, loc) -> do
                 nfp <- getNormalizedFilePathE loc._uri
                 fileContents <- liftIO $ readFile (fromNormalizedFilePath nfp)
                 when (Just loc._uri /= ((._uri) <$> prev)) do
@@ -117,14 +135,14 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
             let newName old = mkTcOcc $ stripLensPrefix $ GHC.occNameString old
                 stripLensPrefix ('_':xs) = xs
                 stripLensPrefix xs = xs
-                filesRefs = collectWith (._uri) $ HS.fromList refs
+                filesRefs = collectWith (._uri) refs
                 getFileEdit (uri, locations) = do
-                    liftIO $ putStrLn $ T.unpack $ getUri uri
-                    liftIO $ putStrLn $ show $ ppLoc <$> HS.toList locations
+                    liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
                     !x <- getSrcEdit ide uri (replaceRefs newName locations)
                     pure x
             fileEdits <- mapM getFileEdit filesRefs
 
+            liftIO $ putStrLn "DIFF:"
             forM_ fileEdits \edit -> do
                 liftIO $ print $ prettyContextDiff (P.text $ T.unpack $ getUri edit.uri) (P.text $ T.unpack $ getUri edit.uri) (P.text . T.unpack) $
                     getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
