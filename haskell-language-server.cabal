@@ -657,6 +657,8 @@ library hls-mass-rename-plugin
     , optparse-applicative
     , extra
     , filepath
+    , Diff
+    , pretty
 
 
 -----------------------------

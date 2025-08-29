@@ -13,7 +13,7 @@ module Ide.Plugin.MassRename (descriptor, E.Log) where
 
 import           Control.Monad
 import           Data.Maybe
-import           Development.IDE                       (Recorder, WithPriority, pretty)
+import           Development.IDE                       (Recorder, WithPriority)
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Service
 import           Development.IDE.Core.Shake
@@ -31,13 +31,26 @@ import           System.FilePath                          (takeExtension,
                                                            takeFileName)
 import qualified Development.IDE.GHC.Compat as GHC
 -- import Debug.Trace
-import Control.Monad.Except (runExceptT)
+import Control.Monad.Except (runExceptT, ExceptT)
 import Data.Either (fromRight)
-import Data.List (sort)
-import Ide.Plugin.Error (getNormalizedFilePathE)
-import Control.Monad.IO.Class (liftIO)
+import Ide.Plugin.Error (getNormalizedFilePathE, PluginError)
+import Control.Monad.IO.Class (liftIO, MonadIO)
 import Development.IDE.Core.PluginUtils (runActionE, useE)
-import qualified Data.Text as Text
+import Development.IDE.GHC.Compat (ParsedSource)
+import Data.Text (Text)
+import Development.IDE.GHC.Compat.Core (mkTcOcc)
+import qualified Data.Text as T
+import Data.Hashable (Hashable)
+import Data.HashSet (HashSet)
+import Data.List.NonEmpty (NonEmpty(..))
+import Ide.Plugin.Rename (replaceRefs)
+import qualified Data.HashSet as HS
+import Data.List.NonEmpty.Extra (groupWith)
+import Development.IDE.GHC.ExactPrint (GetAnnotatedParsedSource(..))
+import Development.IDE.GHC.Compat.ExactPrint (exactPrint)
+import Data.Algorithm.DiffContext (getContextDiff, prettyContextDiff)
+
+import qualified Text.PrettyPrint.HughesPJ as P
 
 -- import qualified Data.HashMap.Strict as HashMap
 -- import Development.IDE.Core.OfInterest (setFilesOfInterest)
@@ -70,11 +83,27 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         unless (null failed) $
             putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
 
-        fmap (fromRight (error "plugin error")) $ runExceptT $ forM_ succeeded $ \case
-            (Just mod, fp) ->
-                forM_ (findTypesToRefactor mod) \tr -> do
-                    liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
-                    refs <- concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
+        fmap (fromRight (error "plugin error")) $ runExceptT $ do
+            refs <- fmap concat $ forM succeeded $ \case
+                (Just mod, fp) ->
+                    fmap concat $ forM (findTypesToRefactor mod) \tr -> do
+                        liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
+                        concat <$> mapM (Rename.refsAtName ide (toNormalizedFilePath' fp)) tr.fieldNames
+                _ -> pure []
+            --
+            -- Perform rename
+            let newName = mkTcOcc "todo_new_name"
+                filesRefs = collectWith (._uri) $ HS.fromList refs
+                getFileEdit (uri, locations) = do
+                    getSrcEdit ide uri (replaceRefs newName locations)
+            fileEdits <- mapM getFileEdit filesRefs
+
+            forM_ fileEdits \edit -> do
+                liftIO $ print $ prettyContextDiff (P.text $ T.unpack $ getUri edit.uri) (P.text $ T.unpack $ getUri edit.uri) (P.text . T.unpack) $
+                    getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
+
+
+{-
                     forM_ (withPrevious $ sort $ nubOrd refs) \(prev, loc) -> do
                         nfp <- getNormalizedFilePathE loc._uri
                         when (toNormalizedFilePath' fp /= nfp) do
@@ -84,10 +113,40 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                             liftIO $ putStrLn $ "  " <> (lines fileContents !! fromIntegral loc._range._start._line)
                             liftIO $ putStrLn $ "  " <> replicate (fromIntegral loc._range._start._character) ' '
                                     <> replicate (fromIntegral (loc._range._end._character - loc._range._start._character)) '^'
-            _ -> pure ()
+                                    -}
 
-withPrevious :: [a] -> [(Maybe a, a)]
-withPrevious xs = zip (Nothing : map Just xs) xs
+collectWith :: (Hashable a, Eq b) => (a -> b) -> HashSet a -> [(b, HashSet a)]
+collectWith f = map (\(a :| as) -> (f a, HS.fromList (a:as))) . groupWith f . HS.toList
+
+data FileEdit = FileEdit
+    { uri :: Uri
+    , before :: Text
+    , after :: Text
+    } deriving (Show)
+
+-- Nicked from Rename plugin, but we're not using WorkspaceEdit since we're not
+-- in a LSP environment.
+getSrcEdit ::
+    MonadIO m =>
+    IdeState ->
+    Uri ->
+    (ParsedSource -> ParsedSource) ->
+    ExceptT PluginError m FileEdit
+getSrcEdit state uri updatePs = do
+    nfp <- getNormalizedFilePathE uri
+    annAst <- runActionE "Rename.GetAnnotatedParsedSource" state
+        (useE GetAnnotatedParsedSource nfp)
+    let ps = annAst
+        src = T.pack $ exactPrint ps
+        res = T.pack $ exactPrint (updatePs ps)
+    pure $ FileEdit
+        { uri = uri
+        , before = src
+        , after = res
+        }
+
+-- withPrevious :: [a] -> [(Maybe a, a)]
+-- withPrevious xs = zip (Nothing : map Just xs) xs
 
 data TypeToRefactor = TypeToRefactor
     { module_ :: GHC.ModuleName
