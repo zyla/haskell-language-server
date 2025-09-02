@@ -56,17 +56,17 @@ import qualified Text.PrettyPrint.HughesPJ as P
 import Development.IDE.GHC.Compat (OccName)
 import Development.IDE.GHC.Compat (AnnListItem)
 import Development.IDE.GHC.Compat (GenLocated(L))
-import Generics.SYB (mkT)
-import Data.Generics (everywhere)
-import Generics.SYB (extT)
 import Development.IDE.GHC.Compat (SrcSpan)
 import Development.IDE.GHC.Error (srcSpanToLocation)
 import Debug.Trace
 import qualified Data.List as List
 import qualified Development.IDE.Spans.LocalBindings as LocalBindings
+import Data.Typeable (eqT)
 
 import qualified Data.HashMap.Strict as HashMap
 import Development.IDE.Core.OfInterest (setFilesOfInterest)
+import Generics.SYB (mkT , extT , Data , gmapT)
+import Data.Typeable (type (:~:)(Refl))
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -149,11 +149,19 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                     getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
 
 ppLoc :: Location -> String
-ppLoc loc = show loc._range._start._line <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
+ppLoc loc = show (loc._range._start._line + 1) <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
 
 ppLocWithFileName :: Location -> String
-ppLocWithFileName loc = (T.unpack $ T.intercalate "/" $ untilSrc $ T.splitOn "/" $ getUri loc._uri) <> ":" <> show loc._range._start._line <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
+ppLocWithFileName loc = (T.unpack $ T.intercalate "/" $ untilSrc $ T.splitOn "/" $ getUri loc._uri) <> ":" <> ppLoc loc
     where untilSrc = dropWhile (/= "src")
+
+-- | Whether we're inside a record field label.
+--
+-- Why is this needed? We report name shadowing conflicts arising from a rename.
+-- However, reprting all `RdrName`s produces false positives in record field
+-- labels, so we use this "traversal mode" to know whether to filter out the
+-- conflict.
+data Mode = Default | InRecordField deriving (Eq, Show)
 
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::
@@ -162,30 +170,36 @@ replaceRefs ::
     LocalBindings.Bindings ->
     ParsedSource ->
     ParsedSource
-replaceRefs newName refs lb = everywhere $
-    -- there has to be a better way...
-    mkT (replaceLoc @AnnListItem) `extT`
-    -- replaceLoc @AnnList `extT` -- not needed
-    -- replaceLoc @AnnParen `extT` -- not needed
-    -- replaceLoc @AnnPragma `extT` -- not needed
-    -- replaceLoc @AnnContext `extT` -- not needed
-    -- replaceLoc @NoEpAnns `extT` -- not needed
-    replaceLoc @NameAnn
+replaceRefs newName refs lb = go Default
     where
-        replaceLoc :: forall an. GHC.LocatedAn an GHC.RdrName -> GHC.LocatedAn an GHC.RdrName
+        go :: forall a. Data a => Mode -> a -> a
+        -- https://hackage-content.haskell.org/package/ghc-lib-parser-9.10.2.20250515/docs/Language-Haskell-Syntax-Expr.html#t:HsRecordBinds
+        go mode x | Just Refl <- eqT @a @(GHC.HsFieldBind (GHC.LFieldOcc GHC.GhcPs) (GHC.LHsExpr GHC.GhcPs))
+            = goHsFieldBind mode x
+        -- https://hackage-content.haskell.org/package/ghc-lib-parser-9.10.2.20250515/docs/Language-Haskell-Syntax-Pat.html#t:HsRecUpdField
+        go mode x | Just Refl <- eqT @a @(GHC.HsFieldBind (GHC.LAmbiguousFieldOcc GHC.GhcPs) (GHC.LHsExpr GHC.GhcPs))
+            = goHsFieldBind mode x
+        go mode x =
+            gmapT (go mode) . (mkT (replaceLoc @AnnListItem mode) `extT` replaceLoc @NameAnn mode) $ x
+
+        goHsFieldBind mode (GHC.HsFieldBind ann lhs rhs pun)
+            = GHC.HsFieldBind (go mode ann) (go InRecordField lhs) (go mode rhs) (go mode pun)
+
+        replaceLoc :: forall an. Mode -> GHC.LocatedAn an GHC.RdrName -> GHC.LocatedAn an GHC.RdrName
 --       replaceLoc (L srcSpan oldRdrName) | trace ("replace? " <> GHC.occNameString (GHC.rdrNameOcc oldRdrName)
 --           <> " -> " <> show (isRef (GHC.locA srcSpan))) False = undefined
-        replaceLoc (L srcSpan oldRdrName)
+        replaceLoc mode (L srcSpan oldRdrName)
             | isRef (GHC.locA srcSpan) =
                 let newName' = newName (GHC.rdrNameOcc oldRdrName)
                     !_ | GHC.RealSrcSpan realSpan _ <- GHC.locA srcSpan
                        , scope <- fst <$> LocalBindings.getLocalScope lb realSpan
                        , conflicts <- filter ((== GHC.occNameFS newName') . GHC.occNameFS . GHC.nameOccName) scope
                        , not (null conflicts)
+                       , mode /= InRecordField
                        = trace ("CONFLICT: " <> GHC.printWithoutUniques conflicts <> " at " <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan))) ()
                        | otherwise = ()
                 in L srcSpan $ replace oldRdrName newName'
-        replaceLoc lOldRdrName = lOldRdrName
+        replaceLoc _ lOldRdrName = lOldRdrName
         replace :: GHC.RdrName -> GHC.OccName -> GHC.RdrName
         replace (GHC.Qual modName _) newName' = GHC.Qual modName newName'
         replace _                    newName' = GHC.Unqual newName'
