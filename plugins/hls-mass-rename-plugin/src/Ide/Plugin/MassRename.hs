@@ -45,6 +45,7 @@ import Development.IDE.GHC.Compat.Core (mkTcOcc)
 import qualified Data.Text as T
 import Data.Hashable (Hashable)
 import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.HashSet as HS
 import Data.List.NonEmpty.Extra (groupWith)
@@ -61,12 +62,11 @@ import Development.IDE.GHC.Error (srcSpanToLocation)
 import Debug.Trace
 import qualified Data.List as List
 import qualified Development.IDE.Spans.LocalBindings as LocalBindings
-import Data.Typeable (eqT)
-
 import qualified Data.HashMap.Strict as HashMap
 import Development.IDE.Core.OfInterest (setFilesOfInterest)
-import Generics.SYB (mkT , extT , Data , gmapT)
-import Data.Typeable (type (:~:)(Refl))
+import Generics.SYB (mkT , extT , Data , gmapT, ext2T)
+import System.Environment (lookupEnv)
+import qualified Data.Text.IO as T
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -116,12 +116,21 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 forM directRefs \ref -> do
                     (nfp, pos) <- Rename.locToFilePos ref
                     fmap (nfp,) <$> Rename.getNamesAtPos state nfp pos
-            let oldNames = filter matchesDirect indirectOldNames ++ directOldNames
+            let indirectOldNamesFiltered = filter (isIndirectRef . snd) indirectOldNames
                    where
-                     matchesDirect (_, n) = GHC.occNameFS (GHC.nameOccName n) `elem` directFS
-                     directFS = map (GHC.occNameFS . GHC.nameOccName . snd) directOldNames
+                     isIndirectRef n =
+                        fieldNameToString n `HashSet.member` directStrings
+                        && not (nameKey n `HashSet.member` directNames)
+                     directStrings = HashSet.fromList $ map (fieldNameToString . snd) directOldNames
+                     directNames = HashSet.fromList $ map (nameKey .  snd) directOldNames
+                     nameKey = GHC.getKey . GHC.nameUnique
 
-            refs <- HS.fromList . concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) oldNames
+            indirectRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) indirectOldNamesFiltered
+
+            liftIO $ putStrLn $ "Num direct refs: " <> show (length directRefs)
+            liftIO $ putStrLn $ "Num indirect refs: " <> show (length indirectRefs)
+
+            let refs = HashSet.fromList $ directRefs <> indirectRefs
 
             forM_ (withPrevious $ sort $ HS.toList refs) \(prev, loc) -> do
                 nfp <- getNormalizedFilePathE loc._uri
@@ -148,6 +157,12 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 liftIO $ print $ prettyContextDiff (P.text $ T.unpack $ getUri edit.uri) (P.text $ T.unpack $ getUri edit.uri) (P.text . T.unpack) $
                     getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
 
+            shouldApply <- (== Just "1") <$> liftIO (lookupEnv "APPLY")
+            when shouldApply do
+                forM_ fileEdits \edit -> do
+                    nfp <- getNormalizedFilePathE edit.uri
+                    liftIO $ T.writeFile (fromNormalizedFilePath nfp) edit.after
+
 ppLoc :: Location -> String
 ppLoc loc = show (loc._range._start._line + 1) <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
 
@@ -173,14 +188,9 @@ replaceRefs ::
 replaceRefs newName refs lb = go Default
     where
         go :: forall a. Data a => Mode -> a -> a
-        -- https://hackage-content.haskell.org/package/ghc-lib-parser-9.10.2.20250515/docs/Language-Haskell-Syntax-Expr.html#t:HsRecordBinds
-        go mode x | Just Refl <- eqT @a @(GHC.HsFieldBind (GHC.LFieldOcc GHC.GhcPs) (GHC.LHsExpr GHC.GhcPs))
-            = goHsFieldBind mode x
-        -- https://hackage-content.haskell.org/package/ghc-lib-parser-9.10.2.20250515/docs/Language-Haskell-Syntax-Pat.html#t:HsRecUpdField
-        go mode x | Just Refl <- eqT @a @(GHC.HsFieldBind (GHC.LAmbiguousFieldOcc GHC.GhcPs) (GHC.LHsExpr GHC.GhcPs))
-            = goHsFieldBind mode x
-        go mode x =
-            gmapT (go mode) . (mkT (replaceLoc @AnnListItem mode) `extT` replaceLoc @NameAnn mode) $ x
+        go mode =
+            (gmapT (go mode) . (mkT (replaceLoc @AnnListItem mode) `extT` replaceLoc @NameAnn mode))
+            `ext2T` goHsFieldBind mode
 
         goHsFieldBind mode (GHC.HsFieldBind ann lhs rhs pun)
             = GHC.HsFieldBind (go mode ann) (go InRecordField lhs) (go mode rhs) (go mode pun)
@@ -282,9 +292,10 @@ findTypesToRefactor HiFileResult{hirModIface=modIface} =
 
 fieldNameToString :: GHC.Name -> String
 fieldNameToString n =
-    case split (==':') $ GHC.occNameString $ GHC.nameOccName n of
+    let ns = GHC.occNameString $ GHC.nameOccName n
+    in case split (==':') ns of
         ["$sel", fieldName, _] -> fieldName
-        xs -> error $ "unexpected field name: " <> show xs
+        _ -> ns
 
 expandFiles :: [FilePath] -> IO [FilePath]
 expandFiles = concatMapM $ \x -> do

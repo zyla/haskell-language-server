@@ -55,6 +55,8 @@ import           Ide.Types
 import qualified Language.LSP.Protocol.Lens            as L
 import           Language.LSP.Protocol.Message
 import           Language.LSP.Protocol.Types
+import qualified Development.IDE.GHC.Compat as GHC
+import Debug.Trace
 
 instance Hashable (Mod a) where hash n = hash (unMod n)
 
@@ -200,7 +202,8 @@ refsAtName state nfp name = do
     ast <- handleGetHieAst state nfp
     dbRefs <- case nameModule_maybe name of
         Nothing -> pure []
-        Just mod -> liftIO $ mapMaybe rowToLoc <$> withHieDb (\hieDb ->
+        Just mod -> liftIO $ mapMaybe rowToLoc <$> withHieDb (\hieDb -> do
+            traceM $ "findReferences " <> GHC.printWithoutUniques name
             -- See Note [Generated references]
 --            filter (\(refRow HieDb.:. _) -> refIsGenerated refRow) <$>
             findReferences
