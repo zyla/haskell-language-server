@@ -43,7 +43,7 @@ import Development.IDE.GHC.Compat (ParsedSource, NameAnn)
 import Data.Text (Text)
 import Development.IDE.GHC.Compat.Core (mkTcOcc)
 import qualified Data.Text as T
-import Data.Hashable (Hashable)
+import Data.Hashable (Hashable (hashWithSalt))
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.List.NonEmpty (NonEmpty(..))
@@ -64,9 +64,13 @@ import qualified Data.List as List
 import qualified Development.IDE.Spans.LocalBindings as LocalBindings
 import qualified Data.HashMap.Strict as HashMap
 import Development.IDE.Core.OfInterest (setFilesOfInterest)
-import Generics.SYB (mkT , extT , Data , gmapT, ext2T)
+import Generics.SYB (mkT , extT , Data , gmapT, ext2T, everywhere)
 import System.Environment (lookupEnv)
 import qualified Data.Text.IO as T
+import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieASTs(..))
+import qualified Data.Map as Map
+import Language.Haskell.Syntax.Basic qualified as GHC
+import GHC.Data.FastString qualified as GHC
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -74,6 +78,7 @@ descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
         { pluginCli = Just exampleCli
         }
 
+type TypeMap = Map.Map GHC.RealSrcSpan [GHC.Type]
 
 exampleCli :: ParserInfo (IdeCommand IdeState)
 exampleCli = info (IdeCommand . go <$> fileArg) mempty
@@ -86,10 +91,24 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         absoluteFiles <- nubOrd <$> mapM IO.canonicalizePath files
         putStrLn $ "Found " ++ show (length absoluteFiles) ++ " files"
 
+        let nfps = map toNormalizedFilePath' absoluteFiles
+
         -- Is this necessary?
         -- Without this we get warnings when typechecking ("Typechecked a file which is not currently open in the editor")
         -- But with this, HLS does a lot of stuff and slows down
-        setFilesOfInterest ide $ HashMap.fromList $ map ((,OnDisk) . toNormalizedFilePath') absoluteFiles
+        setFilesOfInterest ide $ HashMap.fromList $ map (,OnDisk) nfps
+
+        asts <- runAction "GetHieAst" ide $ uses GetHieAst nfps
+        typeMaps :: Map.Map NormalizedFilePath TypeMap <- fmap Map.fromList $ forM (zip nfps asts) \case
+            (nfp, Just HAR{hieKind=HieFresh, hieAst}) -> do
+                let typeMap = Map.fromListWith (<>) $ map (fmap (:[])) $ foldMap nodeTypes $ Map.elems $ getAsts hieAst
+                putStrLn $ GHC.printWithoutUniques typeMap
+                pure (nfp, typeMap)
+            -- Just HAR{hieKind=HieFromDisk{}, hieAst} -> do
+            --     putStrLn $ GHC.printWithoutUniques hieAst
+            (nfp, _) -> do
+                _ <- error $ "HIEAST not fresh: " <> show nfp
+                pure (nfp, mempty)
 
         results <- runAction "GetModIface" ide $ uses GetModIface (map toNormalizedFilePath' absoluteFiles)
         let (succeeded, failed) = partition (isJust . fst) $ zip results absoluteFiles
@@ -99,12 +118,17 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         let state = ide
 
         fmap (fromRight (error "plugin error")) $ runExceptT $ do
-            directOldNames <- fmap concat $ forM succeeded $ \case
-                (Just mod, fp) ->
-                    fmap concat $ forM (findTypesToRefactor mod) \tr -> do
+            let typesToRefactor = flip foldMap succeeded $ \case
+                    (Just mod, fp) ->
+                        fmap (toNormalizedFilePath' fp,) (findTypesToRefactor mod)
+                    _ -> []
+
+            let refactoredTypeNames = HS.fromList $ HashableName . (.name) . snd <$> typesToRefactor
+
+            directOldNames <-
+                    fmap concat $ forM typesToRefactor \(nfp, tr) -> do
                         liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
-                        pure $ (toNormalizedFilePath' fp,) <$> tr.fieldNames
-                _ -> pure []
+                        pure $ (nfp,) <$> tr.fieldNames
 
             directRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) directOldNames
 
@@ -120,10 +144,9 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                    where
                      isIndirectRef n =
                         fieldNameToString n `HashSet.member` directStrings
-                        && not (nameKey n `HashSet.member` directNames)
+                        && not (nameHashKey n `HashSet.member` directNames)
                      directStrings = HashSet.fromList $ map (fieldNameToString . snd) directOldNames
-                     directNames = HashSet.fromList $ map (nameKey .  snd) directOldNames
-                     nameKey = GHC.getKey . GHC.nameUnique
+                     directNames = HashSet.fromList $ map (nameHashKey .  snd) directOldNames
 
             indirectRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) indirectOldNamesFiltered
 
@@ -148,7 +171,11 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 filesRefs = collectWith (._uri) refs
                 getFileEdit (uri, locations) = do
                     liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
-                    !x <- getSrcEdit ide uri (replaceRefs newName locations)
+                    nfp <- getNormalizedFilePathE uri
+                    let typeMap = fromMaybe mempty $ Map.lookup nfp typeMaps
+                    !x <- getSrcEdit ide uri (\lb ->
+                        replaceRefs newName locations lb .
+                        replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
                     pure x
             fileEdits <- mapM getFileEdit filesRefs
 
@@ -162,6 +189,23 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 forM_ fileEdits \edit -> do
                     nfp <- getNormalizedFilePathE edit.uri
                     liftIO $ T.writeFile (fromNormalizedFilePath nfp) edit.after
+
+newtype HashableName = HashableName { unHashableName :: GHC.Name }
+    deriving (Eq)
+
+instance Hashable HashableName where
+    hashWithSalt salt = hashWithSalt salt . nameHashKey . unHashableName
+
+nameHashKey :: GHC.Name -> Int
+nameHashKey = GHC.getKey . GHC.nameUnique
+
+nodeTypes :: HieAST a -> [(GHC.RealSrcSpan, a)]
+nodeTypes node = local <> foldMap nodeTypes node.nodeChildren
+    where
+    local = do
+        nodeInfo <- Map.elems (getSourcedNodeInfo node.sourcedNodeInfo)
+        ty <- nodeInfo.nodeType
+        pure (node.nodeSpan, ty)
 
 ppLoc :: Location -> String
 ppLoc loc = show (loc._range._start._line + 1) <> ":" <> show loc._range._start._character <> "-" <> show loc._range._end._character
@@ -177,6 +221,27 @@ ppLocWithFileName loc = (T.unpack $ T.intercalate "/" $ untilSrc $ T.splitOn "/"
 -- labels, so we use this "traversal mode" to know whether to filter out the
 -- conflict.
 data Mode = Default | InRecordField deriving (Eq, Show)
+
+-- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
+replaceFieldAccesses ::
+    (String -> String) ->
+    HashSet HashableName -> -- ^ names of record types to refactor
+    TypeMap ->
+    ParsedSource ->
+    ParsedSource
+replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceExpr)
+    where
+    replaceExpr :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
+    replaceExpr = \case
+        x@GHC.HsGetField { GHC.gf_expr = L srcSpan _, GHC.gf_field = L gfSpan gf_field@(GHC.DotFieldOcc { GHC.dfoLabel = label }) }
+            | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
+            , Just (ty:_) <- Map.lookup recordExprLoc typeMap
+            , GHC.TyConApp tyCon _ <- ty
+            , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+            ->
+                    trace ("record lookup " <> GHC.printWithoutUniques label <> " at type " <> GHC.printWithoutUniques ty)
+                    x { GHC.gf_field = L gfSpan (gf_field { GHC.dfoLabel = GHC.FieldLabelString . GHC.mkFastString . newName . GHC.unpackFS . GHC.field_label <$> label }) }
+        x -> x
 
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::
