@@ -70,6 +70,7 @@ import qualified Data.Text.IO as T
 import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieASTs(..))
 import qualified Data.Map as Map
 import Language.Haskell.Syntax.Basic qualified as GHC
+import Language.Haskell.Syntax.Expr qualified as GHC
 import GHC.Data.FastString qualified as GHC
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
@@ -165,7 +166,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                         <> replicate (fromIntegral (loc._range._end._character - loc._range._start._character)) '^'
 
             -- Perform rename
-            let newName old = mkTcOcc $ stripLensPrefix $ GHC.occNameString old
+            let newName = rewriteOccName stripLensPrefix
                 stripLensPrefix ('_':xs) = xs
                 stripLensPrefix xs = xs
                 filesRefs = collectWith (._uri) refs
@@ -189,6 +190,9 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 forM_ fileEdits \edit -> do
                     nfp <- getNormalizedFilePathE edit.uri
                     liftIO $ T.writeFile (fromNormalizedFilePath nfp) edit.after
+
+rewriteOccName :: (String -> String) -> OccName -> OccName
+rewriteOccName fn = mkTcOcc . fn . GHC.occNameString
 
 newtype HashableName = HashableName { unHashableName :: GHC.Name }
     deriving (Eq)
@@ -231,6 +235,14 @@ replaceFieldAccesses ::
     ParsedSource
 replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceExpr)
     where
+    rewriteFieldLabelString = GHC.FieldLabelString . GHC.mkFastString . newName . GHC.unpackFS . GHC.field_label
+
+    rewriteRdrName = \case
+        GHC.Unqual nm -> GHC.Unqual (rewriteOccName newName nm)
+        GHC.Qual x nm -> GHC.Qual x (rewriteOccName newName nm)
+        GHC.Orig{} -> error "Orig RdrName should not happen here"
+        GHC.Exact{} -> error "Exact RdrName should not happen here"
+
     replaceExpr :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
     replaceExpr = \case
         x@GHC.HsGetField { GHC.gf_expr = L srcSpan _, GHC.gf_field = L gfSpan gf_field@(GHC.DotFieldOcc { GHC.dfoLabel = label }) }
@@ -240,7 +252,37 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceEx
             , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
             ->
                     trace ("record lookup " <> GHC.printWithoutUniques label <> " at type " <> GHC.printWithoutUniques ty)
-                    x { GHC.gf_field = L gfSpan (gf_field { GHC.dfoLabel = GHC.FieldLabelString . GHC.mkFastString . newName . GHC.unpackFS . GHC.field_label <$> label }) }
+                    x { GHC.gf_field = L gfSpan (gf_field { GHC.dfoLabel = rewriteFieldLabelString <$> label }) }
+
+        x@GHC.RecordUpd { GHC.rupd_expr = L srcSpan _, GHC.rupd_flds = fields }
+            | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
+            , Just (ty:_) <- Map.lookup recordExprLoc typeMap
+            , GHC.TyConApp tyCon _ <- ty
+            , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+            ->
+                    let updatedFields =
+                            case fields of
+                                Right _fields' ->
+                                    error ("overloaded record update at type " <> GHC.printWithoutUniques ty <> "@" <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan)))
+                                    -- Right (map (fmap
+                                    --     (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
+                                    --         field { GHC.hfbLHS = fmap (\(GHC.FieldLabelStrings labels) ->
+                                    --             GHC.FieldLabelStrings (fmap (fmap
+                                    --                 (\dfo@GHC.DotFieldOcc{GHC.dfoLabel = label} -> dfo { GHC.dfoLabel = rewriteFieldLabelString <$> label })
+                                    --             ) labels)) lhs })
+                                    -- ) fields')
+                                Left fields' ->
+                                    trace ("normal record update at type " <> GHC.printWithoutUniques ty <> "@" <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan))) $
+                                    Left (map (fmap
+                                        (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
+                                            field { GHC.hfbLHS = fmap (\case
+                                                GHC.Ambiguous x rdrName -> GHC.Ambiguous x $ fmap rewriteRdrName rdrName
+                                                GHC.Unambiguous x rdrName -> GHC.Unambiguous x $ fmap rewriteRdrName rdrName
+                                            ) lhs })
+                                    ) fields')
+
+                    in x { GHC.rupd_flds = updatedFields }
+
         x -> x
 
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
