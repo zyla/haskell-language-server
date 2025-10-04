@@ -4,7 +4,7 @@ name:           basic
 version:        0.1.0.0
 author:         Test
 maintainer:     test@example.com
-license:        AllRightsReserved
+license:        NONE
 build-type:     Simple
 
 library
@@ -13,6 +13,9 @@ library
       Types2
       Use
       UseSelector
+      UseWithoutConstructor
+      UseWithConstructor
+      UseWithOpenImport
   hs-source-dirs:
       src
   default-extensions:

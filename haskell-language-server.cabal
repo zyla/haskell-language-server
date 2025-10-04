@@ -665,11 +665,14 @@ test-suite hls-mass-rename-plugin-tests
   if !flag(rename)
     buildable: False
   type:             exitcode-stdio-1.0
+  build-tool-depends:
+    haskell-language-server:haskell-language-server
   hs-source-dirs:   plugins/hls-mass-rename-plugin/test
   main-is:          Main.hs
   build-depends:
     , directory
     , filepath
+    , process
     , tasty
     , tasty-hunit
     , temporary
