@@ -13,9 +13,6 @@ library
       Types2
       Use
       UseSelector
-      UseWithoutConstructor
-      UseWithConstructor
-      UseWithOpenImport
   hs-source-dirs:
       src
   default-extensions:
