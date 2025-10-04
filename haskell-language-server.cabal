@@ -660,6 +660,21 @@ library hls-mass-rename-plugin
     , Diff
     , pretty
 
+test-suite hls-mass-rename-plugin-tests
+  import:           defaults, pedantic, test-defaults, warnings
+  if !flag(rename)
+    buildable: False
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   plugins/hls-mass-rename-plugin/test
+  main-is:          Main.hs
+  build-depends:
+    , directory
+    , filepath
+    , tasty
+    , tasty-hunit
+    , temporary
+    , text
+
 
 -----------------------------
 -- retrie plugin
