@@ -64,14 +64,16 @@ import qualified Data.List as List
 import qualified Development.IDE.Spans.LocalBindings as LocalBindings
 import qualified Data.HashMap.Strict as HashMap
 import Development.IDE.Core.OfInterest (setFilesOfInterest)
-import Generics.SYB (mkT , extT , Data , gmapT, ext2T, everywhere)
+import Generics.SYB (mkT , extT , Data , gmapT, ext2T, everywhere, everything, mkQ)
 import System.Environment (lookupEnv)
 import qualified Data.Text.IO as T
 import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieASTs(..))
 import qualified Data.Map as Map
 import Language.Haskell.Syntax.Basic qualified as GHC
-import Language.Haskell.Syntax.Expr qualified as GHC
 import GHC.Data.FastString qualified as GHC
+import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed))
+import qualified Data.Set as Set
+import Data.Set (Set)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -175,6 +177,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                     nfp <- getNormalizedFilePathE uri
                     let typeMap = fromMaybe mempty $ Map.lookup nfp typeMaps
                     !x <- getSrcEdit ide uri (\lb ->
+                        addMissingConstructorImports typeMap .
                         replaceRefs newName locations lb .
                         replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
                     pure x
@@ -285,6 +288,121 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceEx
 
         x -> x
 
+-- | Extract the module name from a Type (if it's a TyConApp)
+getTyConModule :: GHC.Type -> Maybe (GHC.ModuleName, GHC.Name)
+getTyConModule (GHC.TyConApp tyCon _) =
+    case GHC.nameModule_maybe (GHC.getName tyCon) of
+        Just mod -> Just (GHC.moduleName mod, GHC.getName tyCon)
+        Nothing -> Nothing
+getTyConModule _ = Nothing
+
+-- | Collect all record types that are used in field accesses in the given ParsedSource
+--   These types will need their constructors to be imported for OverloadedRecordDot to work
+collectFieldAccessTypes :: TypeMap -> ParsedSource -> Set (GHC.ModuleName, GHC.Name)
+collectFieldAccessTypes typeMap ps =
+    Set.fromList $ mapMaybe extractType $ collectFieldAccesses ps
+  where
+    extractType :: GHC.RealSrcSpan -> Maybe (GHC.ModuleName, GHC.Name)
+    extractType srcSpan = do
+        (ty:_) <- Map.lookup srcSpan typeMap
+        getTyConModule ty
+
+    collectFieldAccesses :: Data a => a -> [GHC.RealSrcSpan]
+    collectFieldAccesses = everything (++) (mkQ [] getFieldAccessSpan)
+
+    getFieldAccessSpan :: GHC.HsExpr GHC.GhcPs -> [GHC.RealSrcSpan]
+    getFieldAccessSpan = \case
+        -- Field access: r.field
+        GHC.HsGetField { GHC.gf_expr = L srcSpan _ }
+            | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
+            -> [recordExprLoc]
+        -- Field projection: (.field)
+        GHC.HsProjection { GHC.proj_flds = _ }
+            -> []  -- TODO: handle projections if needed
+        _ -> []
+
+-- | Check if a type constructor is accessible (i.e., constructor is imported)
+--   from the given import declarations
+hasConstructorAccess :: GHC.ModuleName -> GHC.Name -> [GHC.LImportDecl GHC.GhcPs] -> Bool
+hasConstructorAccess targetModule targetName imports =
+    any checkImport imports
+  where
+    checkImport :: GHC.LImportDecl GHC.GhcPs -> Bool
+    checkImport (GHC.L _ imp)
+        | GHC.unLoc (GHC.ideclName imp) == targetModule =
+            case GHC.ideclImportList imp of
+                -- No import list means everything is imported (if not qualified-only)
+                Nothing -> GHC.ideclQualified imp /= GHC.QualifiedPre && GHC.ideclQualified imp /= GHC.QualifiedPost
+                -- Check if type with constructors is in import list
+                Just (GHC.Exactly, limports) ->
+                    any (hasTypeConstructor targetName) (map GHC.unLoc (GHC.unLoc limports))
+                Just (GHC.EverythingBut, _) -> False  -- Hiding list - too complex
+        | otherwise = False
+
+    hasTypeConstructor :: GHC.Name -> GHC.IE GHC.GhcPs -> Bool
+    hasTypeConstructor name ie = case ie of
+        -- Type with all constructors: Type(..)
+        GHC.IEThingAll _ (GHC.L _ ieName) ->
+            getIEName ieName == GHC.nameOccName name
+        -- Type with specific constructors: Type(Con1, Con2)
+        GHC.IEThingWith _ (GHC.L _ ieName) _ _ ->
+            getIEName ieName == GHC.nameOccName name
+        _ -> False
+
+    getIEName :: GHC.IEWrappedName GHC.GhcPs -> GHC.OccName
+    getIEName (GHC.IEName _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
+    getIEName (GHC.IEPattern _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
+    getIEName (GHC.IEType _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
+
+-- | Add missing constructor imports to a ParsedSource
+--   This is needed for OverloadedRecordDot to work after renaming fields
+addMissingConstructorImports :: TypeMap -> ParsedSource -> ParsedSource
+addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
+    let accessedTypes = collectFieldAccessTypes typeMap ps
+        imports = GHC.hsmodImports hsModule
+
+        -- Find types that need constructor imports
+        typesNeedingImports = Set.filter
+            (\(modName, tyName) -> not $ hasConstructorAccess modName tyName imports)
+            accessedTypes
+
+        -- Modify imports to add constructors
+        modifiedImports = modifyImports (Set.toList typesNeedingImports) imports
+    in if Set.null typesNeedingImports
+        then ps  -- No changes needed
+        else GHC.L loc (hsModule { GHC.hsmodImports = modifiedImports })
+
+-- | Modify import declarations to add missing constructor imports
+modifyImports :: [(GHC.ModuleName, GHC.Name)] -> [GHC.LImportDecl GHC.GhcPs] -> [GHC.LImportDecl GHC.GhcPs]
+modifyImports [] imports = imports
+modifyImports typesToAdd imports =
+    -- Group types by module
+    let typesByModule = Map.fromListWith (++) [(modName, [tyName]) | (modName, tyName) <- typesToAdd]
+    in map (modifyImport typesByModule) imports
+  where
+    modifyImport :: Map.Map GHC.ModuleName [GHC.Name] -> GHC.LImportDecl GHC.GhcPs -> GHC.LImportDecl GHC.GhcPs
+    modifyImport typeMap (GHC.L loc imp) =
+        case Map.lookup (GHC.unLoc $ GHC.ideclName imp) typeMap of
+            Nothing -> GHC.L loc imp
+            Just names -> GHC.L loc (addTypesToImport names imp)
+
+    addTypesToImport :: [GHC.Name] -> GHC.ImportDecl GHC.GhcPs -> GHC.ImportDecl GHC.GhcPs
+    addTypesToImport names imp =
+        case GHC.ideclImportList imp of
+            Nothing -> imp  -- Open import, nothing to do
+            Just (GHC.Exactly, GHC.L loc limports) ->
+                -- Explicit import list - add Type(..) for each type
+                let newImports = map makeIEThingAll names
+                    allImports = limports ++ newImports
+                in imp { GHC.ideclImportList = Just (GHC.Exactly, GHC.L loc allImports) }
+            Just (GHC.EverythingBut, _) -> imp  -- Hiding list - skip for now (too complex)
+
+    makeIEThingAll :: GHC.Name -> GHC.LIE GHC.GhcPs
+    makeIEThingAll name =
+        let rdrName = GHC.nameRdrName name
+            ieName = GHC.IEName GHC.noExtField (GHC.noLocA rdrName)
+        in GHC.noLocA (GHC.IEThingAll EpAnnNotUsed (GHC.noLocA ieName))
+
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::
     (OccName -> OccName) ->
@@ -322,7 +440,9 @@ replaceRefs newName refs lb = go Default
         replace _                    newName' = GHC.Unqual newName'
 
         isRef :: GHC.SrcSpan -> Bool
-        isRef = (`HS.member` refs) . unsafeSrcSpanToLoc
+        isRef srcSpan = case srcSpanToLocation srcSpan of
+            Nothing -> False  -- UnhelpfulSpan can't be a reference
+            Just location -> location `HS.member` refs
 
 unsafeSrcSpanToLoc :: SrcSpan -> Location
 unsafeSrcSpanToLoc srcSpan =
