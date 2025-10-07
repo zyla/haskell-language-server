@@ -71,9 +71,11 @@ import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieAS
 import qualified Data.Map as Map
 import Language.Haskell.Syntax.Basic qualified as GHC
 import GHC.Data.FastString qualified as GHC
-import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed))
+import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed, EpAnn), TrailingAnn(AddCommaAnn), AnnListItem(..), ann)
 import qualified Data.Set as Set
 import Data.Set (Set)
+import Development.IDE.GHC.ExactPrint (setPrecedingLines, epl)
+import Control.Lens (_last, over)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -391,11 +393,43 @@ modifyImports typesToAdd imports =
         case GHC.ideclImportList imp of
             Nothing -> imp  -- Open import, nothing to do
             Just (GHC.Exactly, GHC.L loc limports) ->
-                -- Explicit import list - add Type(..) for each type
+                -- Explicit import list - add Type(..) for each type with proper comma annotations
                 let newImports = map makeIEThingAll names
-                    allImports = limports ++ newImports
+                    allImports = addImportsWithCommas limports newImports
                 in imp { GHC.ideclImportList = Just (GHC.Exactly, GHC.L loc allImports) }
             Just (GHC.EverythingBut, _) -> imp  -- Hiding list - skip for now (too complex)
+
+    -- Add new imports to existing list with proper comma annotations
+    addImportsWithCommas :: [GHC.LocatedAn AnnListItem (GHC.IE GHC.GhcPs)]
+                         -> [GHC.LocatedAn AnnListItem (GHC.IE GHC.GhcPs)]
+                         -> [GHC.LocatedAn AnnListItem (GHC.IE GHC.GhcPs)]
+    addImportsWithCommas [] newItems = newItems
+    addImportsWithCommas existing [] = existing
+    addImportsWithCommas existing newItems =
+        let -- Add trailing comma to the last existing item if needed
+            existingWithComma = addTrailingCommaToLast existing
+            -- Add spacing to new items (SameLine 1 = 0 lines, 1 column)
+            newItemsWithSpacing = map (\item -> setPrecedingLines item 0 1) newItems
+        in existingWithComma ++ newItemsWithSpacing
+
+    -- Add trailing comma to the last item in the list if not already present
+    addTrailingCommaToLast :: [GHC.LocatedAn AnnListItem a] -> [GHC.LocatedAn AnnListItem a]
+    addTrailingCommaToLast [] = []
+    addTrailingCommaToLast items = over _last addCommaToItem items
+      where
+        addCommaToItem :: GHC.LocatedAn AnnListItem a -> GHC.LocatedAn AnnListItem a
+        addCommaToItem (GHC.L srcAnn item) =
+            let newAnn = case ann srcAnn of
+                    EpAnn anchor (AnnListItem trailing) comments ->
+                        -- Check if comma already exists
+                        let hasComma = any isComma trailing
+                            newTrailing = if hasComma then trailing else trailing ++ [AddCommaAnn (epl 0)]
+                        in EpAnn anchor (AnnListItem newTrailing) comments
+                    other -> other  -- EpAnnNotUsed or other cases
+            in GHC.L (srcAnn { ann = newAnn }) item
+
+        isComma (AddCommaAnn _) = True
+        isComma _ = False
 
     makeIEThingAll :: GHC.Name -> GHC.LIE GHC.GhcPs
     makeIEThingAll name =

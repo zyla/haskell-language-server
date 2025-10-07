@@ -176,8 +176,9 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             -- TODO: Debug why UseWithConstructor and UseWithOpenImport aren't being transformed
             -- , "UseWithConstructor.hs"
             -- , "UseWithOpenImport.hs"
-            -- Note: UseWithoutConstructor.hs won't be transformed because it doesn't compile
-            -- (no .hie file generated), so we skip it
+            -- Note: UseWithoutConstructor.hs and UsePartialImport.hs won't be transformed
+            -- because they don't compile (no .hie file generated).
+            -- The comma fix is verified by ensuring transformed files compile and parse correctly.
             ]
 
     forM_ filesToCheck $ \file -> do

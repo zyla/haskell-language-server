@@ -11,10 +11,13 @@ library
   exposed-modules:
       Types1
       Types2
+      Types3
       Use
       UseSelector
       UseWithConstructor
       UseWithOpenImport
+      -- UsePartialImport excluded: can't test the exact scenario due to circular dependency
+      -- (needs constructors to compile, but test is about adding constructors)
   hs-source-dirs:
       src
   default-extensions:
