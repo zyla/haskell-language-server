@@ -21,7 +21,6 @@ main = defaultMain tests
 tests :: TestTree
 tests = testGroup "MassRename CLI Tests"
     [ testCase "Input files compile correctly" testInputFilesCompile
-    , testCase "Broken input fails as expected" testBrokenInputFails
     , testCase "Integration: mass-rename transforms files correctly" testMassRenameIntegration
     ]
 
@@ -51,69 +50,6 @@ testInputFilesCompile = withSystemTempDirectory "mass-rename-compile-test" $ \tm
             "This indicates test data is broken.\n" ++
             "Stdout: " ++ stdout ++ "\n" ++
             "Stderr: " ++ stderr
-
--- | Test that UseWithoutConstructor.hs fails to compile (as expected)
-testBrokenInputFails :: IO ()
-testBrokenInputFails = withSystemTempDirectory "mass-rename-broken-test" $ \tmpDir -> do
-    let testDataDir = "plugins/hls-mass-rename-plugin/test/testdata/basic"
-        srcFile = testDataDir </> "src" </> "UseWithoutConstructor.hs"
-
-    -- Copy just the files needed to test UseWithoutConstructor
-    createDirectoryIfMissing True (tmpDir </> "src")
-    copyFile srcFile (tmpDir </> "src" </> "UseWithoutConstructor.hs")
-    copyFile (testDataDir </> "src" </> "Types1.hs") (tmpDir </> "src" </> "Types1.hs")
-    copyFile (testDataDir </> "src" </> "Types2.hs") (tmpDir </> "src" </> "Types2.hs")
-    copyFile (testDataDir </> "hie.yaml") (tmpDir </> "hie.yaml")
-    copyFile (testDataDir </> "cabal.project") (tmpDir </> "cabal.project")
-
-    -- Create a minimal cabal file that includes UseWithoutConstructor
-    let cabalContent = unlines
-            [ "cabal-version: 2.2"
-            , "name: broken-test"
-            , "version: 0.1.0.0"
-            , "library"
-            , "  exposed-modules:"
-            , "      Types1"
-            , "      Types2"
-            , "      UseWithoutConstructor"
-            , "  hs-source-dirs: src"
-            , "  default-extensions:"
-            , "      OverloadedStrings"
-            , "      DuplicateRecordFields"
-            , "      OverloadedRecordDot"
-            , "      NamedFieldPuns"
-            , "      LambdaCase"
-            , "      RecordWildCards"
-            , "  build-depends:"
-            , "      base >=4.7 && <5"
-            , "    , text"
-            , "  default-language: Haskell2010"
-            ]
-    writeFile (tmpDir </> "broken-test.cabal") cabalContent
-
-    -- Save current directory and change to temp
-    origDir <- getCurrentDirectory
-    setCurrentDirectory tmpDir
-
-    -- Try to build - should fail
-    (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["build"] ""
-
-    -- Restore directory
-    setCurrentDirectory origDir
-
-    -- Check that build failed (as expected)
-    case exitCode of
-        ExitFailure _ ->
-            -- Verify it failed for the right reason (missing HasField instance)
-            let combinedOutput = stdout ++ stderr
-            in unless ("HasField" `isInfixOf` combinedOutput) $
-                assertFailure $
-                    "Build failed but not due to HasField error:\n" ++
-                    "Stdout: " ++ stdout ++ "\n" ++
-                    "Stderr: " ++ stderr
-        ExitSuccess -> assertFailure $
-            "UseWithoutConstructor.hs compiled successfully, but it should fail!\n" ++
-            "This indicates the test case is broken."
 
 -- | Copy a directory recursively
 copyDirectory :: FilePath -> FilePath -> IO ()
@@ -173,12 +109,11 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             , "Types2.hs"
             , "Use.hs"
             , "UseSelector.hs"
+            , "UseWithoutConstructor.hs"
+            , "UsePartialImport.hs"
             -- TODO: Debug why UseWithConstructor and UseWithOpenImport aren't being transformed
             -- , "UseWithConstructor.hs"
             -- , "UseWithOpenImport.hs"
-            -- Note: UseWithoutConstructor.hs and UsePartialImport.hs won't be transformed
-            -- because they don't compile (no .hie file generated).
-            -- The comma fix is verified by ensuring transformed files compile and parse correctly.
             ]
 
     forM_ filesToCheck $ \file -> do

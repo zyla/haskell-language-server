@@ -1,8 +1,10 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Types1 where
 
 import Data.Text (Text)
+import PrefixedFields (unprefixFields)
 
 data Restaurant = Restaurant
   { _id :: Int
@@ -21,3 +23,5 @@ data FulfillmentMethod
 
 useInSameModule :: Restaurant -> Text
 useInSameModule Restaurant{_name} = "R:" <> _name
+
+unprefixFields ''Restaurant

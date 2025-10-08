@@ -1,5 +1,9 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TemplateHaskell#-}
+
 module Types3 where
+
+import PrefixedFields (unprefixFields)
 
 data SectionContent = SectionContent
   { _items :: [String]
@@ -21,3 +25,5 @@ data MenuItem = MenuItem
 -- Function that returns MenuSection without requiring it to be imported
 getDefaultMenuSection :: MenuSection
 getDefaultMenuSection = MenuSection "Default" "Default menu section"
+
+unprefixFields ''MenuSection

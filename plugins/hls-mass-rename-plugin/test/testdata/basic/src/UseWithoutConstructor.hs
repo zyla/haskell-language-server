@@ -13,15 +13,15 @@ import Types2 (Account)
 -- These functions use OverloadedRecordDot but constructor isn't imported
 -- After rename, the import should be updated to Restaurant(..)
 useRestaurantDot :: Restaurant -> Text
-useRestaurantDot r = "R:" <> T.pack (show r._id) <> r._name
+useRestaurantDot r = "R:" <> T.pack (show r.id) <> r.name
 
 useAccountDot :: Account -> Text
-useAccountDot a = "A:" <> T.pack (show a._id) <> a._name
+useAccountDot a = "A:" <> T.pack (show a.id) <> a.name
 
 -- Multiple field accesses from same type
 multipleAccesses :: Restaurant -> Text
-multipleAccesses r = r._name <> r._slug
+multipleAccesses r = r.name <> r.slug
 
 -- Nested field access
 nestedAccess :: [Restaurant] -> Text
-nestedAccess rs = T.intercalate "," (map (._name) rs)
+nestedAccess rs = T.intercalate "," (map (.name) rs)

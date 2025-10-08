@@ -16,8 +16,9 @@ library
       UseSelector
       UseWithConstructor
       UseWithOpenImport
-      -- UsePartialImport excluded: can't test the exact scenario due to circular dependency
-      -- (needs constructors to compile, but test is about adding constructors)
+      UseWithoutConstructor
+      UsePartialImport
+      PrefixedFields
   hs-source-dirs:
       src
   default-extensions:
@@ -27,8 +28,10 @@ library
       NamedFieldPuns
       LambdaCase
       RecordWildCards
+      DataKinds
   ghc-options: -Wall -Wno-unticked-promoted-constructors -Wno-name-shadowing
   build-depends:
       base >=4.7 && <5
     , text
+    , template-haskell
   default-language: Haskell2010
