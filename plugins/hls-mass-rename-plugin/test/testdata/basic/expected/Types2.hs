@@ -1,10 +1,14 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Types2 where
 
 import Data.Text (Text)
+import PrefixedFields (unprefixFields)
 
 data Account = Account
-  { id :: Int
-  , name :: Text
+  { _id :: Int
+  , _name :: Text
   }
+
+unprefixFields ''Account
