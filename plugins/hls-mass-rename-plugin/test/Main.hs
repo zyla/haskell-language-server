@@ -101,6 +101,9 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             "\nStdout: " ++ stdout ++
             "\nStderr: " ++ stderr
 
+    -- Check if we should accept golden files (update expected outputs)
+    acceptGolden <- lookupEnv "ACCEPT"
+
     -- Compare output files with expected (only files that compile)
     let filesToCheck =
             [ "Types1.hs"
@@ -123,4 +126,11 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
 
         case exitCode of
             ExitSuccess -> pure ()  -- Files match
-            _ -> assertFailure $ "File " ++ file ++ " differs from expected:\n" ++ diffOutput
+            _ -> case acceptGolden of
+                Just _ -> do
+                    -- Accept mode: update expected file with actual output
+                    copyFile actualPath expectedPath
+                    putStrLn $ "✓ Accepted golden file: " ++ file
+                Nothing ->
+                    -- Normal mode: fail with diff
+                    assertFailure $ "File " ++ file ++ " differs from expected:\n" ++ diffOutput
