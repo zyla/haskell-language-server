@@ -10,7 +10,8 @@ import qualified Data.Text as T
 import Types1 (Restaurant(..))
 import Types2 (Account(..))
 
--- These functions use OverloadedRecordDot and constructor is now imported
+-- These functions use OverloadedRecordDot but constructor isn't imported
+-- After rename, the import should be updated to Restaurant(..)
 useRestaurantDot :: Restaurant -> Text
 useRestaurantDot r = "R:" <> T.pack (show r.id) <> r.name
 

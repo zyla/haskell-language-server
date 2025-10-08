@@ -7,8 +7,8 @@ import Data.Text (Text)
 import PrefixedFields (unprefixFields)
 
 data Account = Account
-  { _id :: Int
-  , _name :: Text
+  { id :: Int
+  , name :: Text
   }
 
 unprefixFields ''Account

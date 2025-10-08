@@ -7,18 +7,18 @@ import Data.Text (Text)
 import PrefixedFields (unprefixFields)
 
 data Restaurant = Restaurant
-  { _id :: Int
-  , _name :: Text
-  , _slug :: Text
+  { id :: Int
+  , name :: Text
+  , slug :: Text
   }
 
 data FulfillmentMethod
   = Delivery
-    { _address :: Text
-    , _price :: Int
+    { address :: Text
+    , price :: Int
     }
   | DineIn
-    { _table :: Int
+    { table :: Int
     }
 
 useInSameModule :: Restaurant -> Text
