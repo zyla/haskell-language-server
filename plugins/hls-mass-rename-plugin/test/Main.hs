@@ -2,10 +2,8 @@
 
 module Main (main) where
 
-import Control.Monad (forM_, unless)
-import Data.List (isInfixOf)
+import Control.Monad (forM_)
 import Data.Maybe (fromMaybe)
-import qualified Data.Text.IO as T
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, getCurrentDirectory, setCurrentDirectory, copyPermissions)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode(..))
@@ -13,7 +11,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcessWithExitCode)
 import Test.Tasty (defaultMain, testGroup, TestTree)
-import Test.Tasty.HUnit (testCase, assertFailure, assertEqual)
+import Test.Tasty.HUnit (testCase, assertFailure)
 
 main :: IO ()
 main = defaultMain tests
@@ -120,6 +118,9 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
         let actualPath = tmpDir </> "src" </> file
             expectedPath = expectedDir </> file
 
-        actual <- T.readFile actualPath
-        expected <- T.readFile expectedPath
-        assertEqual ("File " ++ file ++ " should match expected output") expected actual
+        -- Use diff to compare files - shows only differences
+        (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
+
+        case exitCode of
+            ExitSuccess -> pure ()  -- Files match
+            _ -> assertFailure $ "File " ++ file ++ " differs from expected:\n" ++ diffOutput
