@@ -118,10 +118,12 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     let filesToCheck =
             [ "Types1.hs"
             , "Types2.hs"
+            , "Types4.hs"
             , "Use.hs"
             , "UseSelector.hs"
             , "UseWithoutConstructor.hs"
             , "UsePartialImport.hs"
+            , "UseMultipleConstructors.hs"
             -- TODO: Debug why UseWithConstructor and UseWithOpenImport aren't being transformed
             -- , "UseWithConstructor.hs"
             -- , "UseWithOpenImport.hs"

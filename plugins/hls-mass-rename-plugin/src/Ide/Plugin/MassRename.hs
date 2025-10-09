@@ -487,8 +487,10 @@ modifyImports typesToAdd imports =
     addImportsWithCommas existing newItems =
         let -- Add trailing comma to the last existing item if needed
             existingWithComma = addTrailingCommaToLast existing
+            -- Add trailing commas to all new items except the last
+            newItemsWithCommas = addTrailingCommasExceptLast newItems
             -- Add spacing to new items (SameLine 1 = 0 lines, 1 column)
-            newItemsWithSpacing = map (\item -> setPrecedingLines item 0 1) newItems
+            newItemsWithSpacing = map (\item -> setPrecedingLines item 0 1) newItemsWithCommas
         in existingWithComma ++ newItemsWithSpacing
 
     -- Add trailing comma to the last item in the list if not already present
@@ -505,6 +507,32 @@ modifyImports typesToAdd imports =
                             newTrailing = if hasComma then trailing else trailing ++ [AddCommaAnn (epl 0)]
                         in EpAnn anchor (AnnListItem newTrailing) comments
                     other -> other  -- EpAnnNotUsed or other cases
+            in GHC.L (srcAnn { ann = newAnn }) item
+
+        isComma (AddCommaAnn _) = True
+        isComma _ = False
+
+    -- Add trailing commas to all items except the last one
+    addTrailingCommasExceptLast :: [GHC.LocatedAn AnnListItem a] -> [GHC.LocatedAn AnnListItem a]
+    addTrailingCommasExceptLast [] = []
+    addTrailingCommasExceptLast [x] = [x]  -- Last item gets no comma
+    addTrailingCommasExceptLast items =
+        let allButLast = init items
+            lastItem = last items
+        in map addCommaToItem allButLast ++ [lastItem]
+      where
+        addCommaToItem :: GHC.LocatedAn AnnListItem a -> GHC.LocatedAn AnnListItem a
+        addCommaToItem (GHC.L srcAnn item) =
+            let newAnn = case ann srcAnn of
+                    EpAnn anchor (AnnListItem trailing) comments ->
+                        -- Check if comma already exists
+                        let hasComma = any isComma trailing
+                            newTrailing = if hasComma then trailing else trailing ++ [AddCommaAnn (epl 0)]
+                        in EpAnn anchor (AnnListItem newTrailing) comments
+                    EpAnnNotUsed ->
+                        -- Create a new EpAnn with just the comma
+                        EpAnn (spanAsAnchor GHC.noSrcSpan) (AnnListItem [AddCommaAnn (epl 0)]) emptyComments
+                    other -> other  -- Other cases
             in GHC.L (srcAnn { ann = newAnn }) item
 
         isComma (AddCommaAnn _) = True

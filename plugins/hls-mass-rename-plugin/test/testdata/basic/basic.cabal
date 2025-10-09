@@ -12,12 +12,14 @@ library
       Types1
       Types2
       Types3
+      Types4
       Use
       UseSelector
       UseWithConstructor
       UseWithOpenImport
       UseWithoutConstructor
       UsePartialImport
+      UseMultipleConstructors
       PrefixedFields
   hs-source-dirs:
       src
