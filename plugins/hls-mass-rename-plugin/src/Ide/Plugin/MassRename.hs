@@ -33,7 +33,7 @@ import           Data.List.Extra                          (isPrefixOf, nubOrd,
 import           System.FilePath                          (takeExtension,
                                                            takeFileName)
 import qualified Development.IDE.GHC.Compat as GHC
--- import Debug.Trace
+import Debug.Trace
 import Control.Monad.Except (runExceptT, ExceptT)
 import Data.Either (fromRight)
 import Ide.Plugin.Error (getNormalizedFilePathE, PluginError)
@@ -66,12 +66,13 @@ import qualified Data.HashMap.Strict as HashMap
 import Development.IDE.Core.OfInterest (setFilesOfInterest)
 import Generics.SYB (mkT , extT , Data , gmapT, ext2T, everywhere, everything, mkQ)
 import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Text.IO as T
 import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieASTs(..))
 import qualified Data.Map as Map
 import Language.Haskell.Syntax.Basic qualified as GHC
 import GHC.Data.FastString qualified as GHC
-import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed, EpAnn), TrailingAnn(AddCommaAnn), AnnListItem(..), ann)
+import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed, EpAnn), TrailingAnn(AddCommaAnn), AnnListItem(..), ann, AddEpAnn(..), AnnKeywordId(..), spanAsAnchor, emptyComments)
 import qualified Data.Set as Set
 import Data.Set (Set)
 import Development.IDE.GHC.ExactPrint (setPrecedingLines, epl)
@@ -185,14 +186,29 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                     pure x
             fileEdits <- mapM getFileEdit filesRefs
 
+            -- Also process files that don't have old field references but still need constructor imports
+            -- (e.g., files already using new field names via TH HasField)
+            processedNfpsIO <- mapM (\(uri, _) -> getNormalizedFilePathE uri) filesRefs
+            let processedNfps = HashSet.fromList processedNfpsIO
+                additionalFiles = [(nfp, typeMap) | (nfp, typeMap) <- Map.toList typeMaps
+                                  , not (nfp `HashSet.member` processedNfps)]
+            let getAdditionalFileEdit (nfp, typeMap) = do
+                    let uri = fromNormalizedUri $ filePathToUri' nfp
+                    !x <- getSrcEdit ide uri (\_ ps ->
+                        addMissingConstructorImports typeMap ps)
+                    pure x
+            additionalEdits <- mapM getAdditionalFileEdit additionalFiles
+
+            let allEdits = fileEdits <> additionalEdits
+
             liftIO $ putStrLn "DIFF:"
-            forM_ fileEdits \edit -> do
+            forM_ allEdits \edit -> do
                 liftIO $ print $ prettyContextDiff (P.text $ T.unpack $ getUri edit.uri) (P.text $ T.unpack $ getUri edit.uri) (P.text . T.unpack) $
                     getContextDiff 1 (T.lines edit.before) (T.lines edit.after)
 
             shouldApply <- (== Just "1") <$> liftIO (lookupEnv "APPLY")
             when shouldApply do
-                forM_ fileEdits \edit -> do
+                forM_ allEdits \edit -> do
                     nfp <- getNormalizedFilePathE edit.uri
                     liftIO $ T.writeFile (fromNormalizedFilePath nfp) edit.after
 
@@ -302,12 +318,16 @@ getTyConModule _ = Nothing
 --   These types will need their constructors to be imported for OverloadedRecordDot to work
 collectFieldAccessTypes :: TypeMap -> ParsedSource -> Set (GHC.ModuleName, GHC.Name)
 collectFieldAccessTypes typeMap ps =
-    Set.fromList $ mapMaybe extractType $ collectFieldAccesses ps
+    let spans = collectFieldAccesses ps
+        types = mapMaybe extractType spans
+    in Set.fromList types
   where
     extractType :: GHC.RealSrcSpan -> Maybe (GHC.ModuleName, GHC.Name)
-    extractType srcSpan = do
-        (ty:_) <- Map.lookup srcSpan typeMap
-        getTyConModule ty
+    extractType srcSpan =
+        case Map.lookup srcSpan typeMap of
+            Nothing -> Nothing
+            Just [] -> Nothing
+            Just (ty:_) -> getTyConModule ty
 
     collectFieldAccesses :: Data a => a -> [GHC.RealSrcSpan]
     collectFieldAccesses = everything (++) (mkQ [] getFieldAccessSpan)
@@ -322,6 +342,12 @@ collectFieldAccessTypes typeMap ps =
         GHC.HsProjection { GHC.proj_flds = _ }
             -> []  -- TODO: handle projections if needed
         _ -> []
+
+-- | Extract OccName from IEWrappedName
+getIEName :: GHC.IEWrappedName GHC.GhcPs -> GHC.OccName
+getIEName (GHC.IEName _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
+getIEName (GHC.IEPattern _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
+getIEName (GHC.IEType _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
 
 -- | Check if a type constructor is accessible (i.e., constructor is imported)
 --   from the given import declarations
@@ -349,12 +375,11 @@ hasConstructorAccess targetModule targetName imports =
         -- Type with specific constructors: Type(Con1, Con2)
         GHC.IEThingWith _ (GHC.L _ ieName) _ _ ->
             getIEName ieName == GHC.nameOccName name
+        -- Type without constructors: Type
+        GHC.IEThingAbs _ _ -> False
+        -- Variable import
+        GHC.IEVar _ _ -> False
         _ -> False
-
-    getIEName :: GHC.IEWrappedName GHC.GhcPs -> GHC.OccName
-    getIEName (GHC.IEName _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
-    getIEName (GHC.IEPattern _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
-    getIEName (GHC.IEType _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
 
 -- | Add missing constructor imports to a ParsedSource
 --   This is needed for OverloadedRecordDot to work after renaming fields
@@ -393,11 +418,62 @@ modifyImports typesToAdd imports =
         case GHC.ideclImportList imp of
             Nothing -> imp  -- Open import, nothing to do
             Just (GHC.Exactly, GHC.L loc limports) ->
-                -- Explicit import list - add Type(..) for each type with proper comma annotations
-                let newImports = map makeIEThingAll names
-                    allImports = addImportsWithCommas limports newImports
-                in imp { GHC.ideclImportList = Just (GHC.Exactly, GHC.L loc allImports) }
+                -- Explicit import list - transform IEThingAbs to IEThingAll, and add missing types
+                let namesSet = Set.fromList names
+                    -- Transform matching IEThingAbs to IEThingAll, keep others as-is
+                    transformedImports = map (transformImport namesSet) limports
+                    transformedList = map snd transformedImports
+                    -- Find names that weren't already in the import list
+                    importedNames = Set.fromList $ mapMaybe getImportedTypeName limports
+                    missingNames = filter (\n -> not (GHC.nameOccName n `Set.member` importedNames)) names
+                    -- Create new IEThingAll entries for missing names
+                    newImports = map makeIEThingAll missingNames
+                    -- Combine transformed and new imports
+                    resultImports = if null newImports
+                                    then transformedList
+                                    else addImportsWithCommas transformedList newImports
+                in imp { GHC.ideclImportList = Just (GHC.Exactly, GHC.L loc resultImports) }
             Just (GHC.EverythingBut, _) -> imp  -- Hiding list - skip for now (too complex)
+
+    -- Get the OccName of a type being imported (for any IE variant)
+    getImportedTypeName :: GHC.LIE GHC.GhcPs -> Maybe GHC.OccName
+    getImportedTypeName (GHC.L _ ie) = case ie of
+        GHC.IEThingAbs _ (GHC.L _ ieName) -> Just (getIEName ieName)
+        GHC.IEThingAll _ (GHC.L _ ieName) -> Just (getIEName ieName)
+        GHC.IEThingWith _ (GHC.L _ ieName) _ _ -> Just (getIEName ieName)
+        _ -> Nothing
+
+    -- Transform IEThingAbs to IEThingAll if it matches, return (wasTransformed, result)
+    transformImport :: Set.Set GHC.Name -> GHC.LIE GHC.GhcPs -> (Bool, GHC.LIE GHC.GhcPs)
+    transformImport namesSet limport@(GHC.L loc ie) = case ie of
+        GHC.IEThingAbs ext lieName@(GHC.L _ ieName) ->
+            let occName = getIEName ieName
+                targetOccNames = map GHC.nameOccName (Set.toList namesSet)
+                matches = occName `elem` targetOccNames
+            in if matches
+               then let -- Add (..) annotations to the extension
+                        newExt = addDotDotAnnotations ext
+                    in (True, GHC.L loc (GHC.IEThingAll newExt lieName))
+               else (False, limport)
+        _ -> (False, limport)
+
+    -- Add (..) annotations to the EpAnn for IEThingAll
+    addDotDotAnnotations :: EpAnn [AddEpAnn] -> EpAnn [AddEpAnn]
+    addDotDotAnnotations EpAnnNotUsed = EpAnnNotUsed
+    addDotDotAnnotations (EpAnn anchor anns comments) =
+        let dotdotAnns = [ AddEpAnn AnnOpenP (epl 0)
+                         , AddEpAnn AnnDotdot (epl 0)
+                         , AddEpAnn AnnCloseP (epl 0)
+                         ]
+        in EpAnn anchor (anns ++ dotdotAnns) comments
+
+    -- Check if an import entry is a type-only import (IEThingAbs) for one of the given names
+    -- Note: This function is currently unused as we now handle transformations differently
+    isTypeOnlyImport :: Set.Set GHC.Name -> GHC.LocatedAn AnnListItem (GHC.IE GHC.GhcPs) -> Bool
+    isTypeOnlyImport namesSet (GHC.L _ ie) = case ie of
+        GHC.IEThingAbs _ (GHC.L _ ieName) ->
+            getIEName ieName `elem` map GHC.nameOccName (Set.toList namesSet)
+        _ -> False
 
     -- Add new imports to existing list with proper comma annotations
     addImportsWithCommas :: [GHC.LocatedAn AnnListItem (GHC.IE GHC.GhcPs)]
@@ -435,7 +511,13 @@ modifyImports typesToAdd imports =
     makeIEThingAll name =
         let rdrName = GHC.nameRdrName name
             ieName = GHC.IEName GHC.noExtField (GHC.noLocA rdrName)
-        in GHC.noLocA (GHC.IEThingAll EpAnnNotUsed (GHC.noLocA ieName))
+            -- Create annotations for (..)
+            dotdotAnns = [ AddEpAnn AnnOpenP (epl 0)
+                         , AddEpAnn AnnDotdot (epl 0)
+                         , AddEpAnn AnnCloseP (epl 0)
+                         ]
+            ext = EpAnn (spanAsAnchor GHC.noSrcSpan) dotdotAnns emptyComments
+        in GHC.noLocA (GHC.IEThingAll ext (GHC.noLocA ieName))
 
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::
