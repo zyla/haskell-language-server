@@ -2,7 +2,8 @@
 
 module Main (main) where
 
-import Control.Monad (forM_)
+import Control.Monad (forM_, unless)
+import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, getCurrentDirectory, setCurrentDirectory, copyPermissions)
 import System.Environment (lookupEnv, setEnv)
@@ -49,20 +50,25 @@ testInputFilesCompile = withSystemTempDirectory "mass-rename-compile-test" $ \tm
             "Stdout: " ++ stdout ++ "\n" ++
             "Stderr: " ++ stderr
 
--- | Copy a directory recursively
+-- | Copy a directory recursively, skipping certain directories
 copyDirectory :: FilePath -> FilePath -> IO ()
 copyDirectory src dst = do
     createDirectoryIfMissing True dst
     items <- listDirectory src
     forM_ items $ \item -> do
-        let srcPath = src </> item
-            dstPath = dst </> item
-        isDir <- doesDirectoryExist srcPath
-        if isDir
-            then copyDirectory srcPath dstPath
-            else do
-                copyFile srcPath dstPath
-                copyPermissions srcPath dstPath
+        -- Skip expected directory and build artifacts
+        let skipItems = ["expected", "dist-newstyle", "hie.yaml"]
+            skipPrefixes = [".ghc.environment"]
+            shouldSkip = item `elem` skipItems || any (`isPrefixOf` item) skipPrefixes
+        unless shouldSkip $ do
+            let srcPath = src </> item
+                dstPath = dst </> item
+            isDir <- doesDirectoryExist srcPath
+            if isDir
+                then copyDirectory srcPath dstPath
+                else do
+                    copyFile srcPath dstPath
+                    copyPermissions srcPath dstPath
 
 -- | Integration test that runs mass-rename and verifies output
 testMassRenameIntegration :: IO ()
@@ -80,8 +86,7 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     origDir <- getCurrentDirectory
     setCurrentDirectory tmpDir
 
-    -- Build the test project to generate .hie files (only compiling files work)
-    -- This will fail for UseWithoutConstructor but that's expected
+    -- Build the test project to generate .hie files
     _ <- readProcessWithExitCode "cabal" ["build", "--ghc-options=-fwrite-ide-info"] ""
 
     -- Set APPLY=1 to actually modify files
@@ -92,6 +97,11 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
 
     -- Restore directory
     setCurrentDirectory origDir
+
+    -- Print stderr for debugging
+    putStrLn "=== mass-rename stderr ==="
+    putStrLn stderr
+    putStrLn "==========================="
 
     -- Check exit code
     case exitCode of
