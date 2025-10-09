@@ -181,6 +181,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                     let typeMap = fromMaybe mempty $ Map.lookup nfp typeMaps
                     !x <- getSrcEdit ide uri (\lb ->
                         addMissingConstructorImports typeMap .
+                        removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
                         replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
                     pure x
@@ -195,7 +196,9 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
             let getAdditionalFileEdit (nfp, typeMap) = do
                     let uri = fromNormalizedUri $ filePathToUri' nfp
                     !x <- getSrcEdit ide uri (\_ ps ->
-                        addMissingConstructorImports typeMap ps)
+                        addMissingConstructorImports typeMap .
+                        removeUnprefixFieldsCalls refactoredTypeNames $
+                        ps)
                     pure x
             additionalEdits <- mapM getAdditionalFileEdit additionalFiles
 
@@ -518,6 +521,43 @@ modifyImports typesToAdd imports =
                          ]
             ext = EpAnn (spanAsAnchor GHC.noSrcSpan) dotdotAnns emptyComments
         in GHC.noLocA (GHC.IEThingAll ext (GHC.noLocA ieName))
+
+-- | Remove `unprefixFields ''TypeName` declarations for types being refactored
+--   Since we're removing the field prefixes, the unprefixFields TH calls are no longer needed
+removeUnprefixFieldsCalls :: HashSet HashableName -> ParsedSource -> ParsedSource
+removeUnprefixFieldsCalls typesToRefactor (GHC.L loc hsModule) =
+    let decls = GHC.hsmodDecls hsModule
+        filteredDecls = filter (not . isUnprefixFieldsCallForRefactoredType) decls
+    in GHC.L loc (hsModule { GHC.hsmodDecls = filteredDecls })
+  where
+    -- Check if a declaration is an unprefixFields call for a type we're refactoring
+    isUnprefixFieldsCallForRefactoredType :: GHC.LHsDecl GHC.GhcPs -> Bool
+    isUnprefixFieldsCallForRefactoredType (GHC.L _ decl) = case decl of
+        GHC.SpliceD _ splice -> isSpliceForRefactoredType splice
+        _ -> False
+
+    isSpliceForRefactoredType :: GHC.SpliceDecl GHC.GhcPs -> Bool
+    isSpliceForRefactoredType spliceDecl =
+        -- Use SYB to traverse the splice and look for the pattern we need
+        let hasUnprefixFieldsCall = everything (||) (mkQ False isUnprefixFieldsCall) spliceDecl
+            hasRefactoredTypeName = everything (||) (mkQ False isRefactoredTypeName) spliceDecl
+        in hasUnprefixFieldsCall && hasRefactoredTypeName
+
+    -- Check if an expression is a call to unprefixFields
+    isUnprefixFieldsCall :: GHC.HsExpr GHC.GhcPs -> Bool
+    isUnprefixFieldsCall = \case
+        GHC.HsVar _ (GHC.L _ rdrName) ->
+            GHC.rdrNameOcc rdrName == GHC.mkVarOcc "unprefixFields"
+        _ -> False
+
+    -- Check if an RdrName refers to a type we're refactoring
+    isRefactoredTypeName :: GHC.RdrName -> Bool
+    isRefactoredTypeName = \case
+        GHC.Exact name -> HashableName name `HS.member` typesToRefactor
+        GHC.Unqual occName ->
+            -- Check if any refactored type has a matching OccName
+            any (\(HashableName name) -> GHC.nameOccName name == occName) (HS.toList typesToRefactor)
+        _ -> False
 
 -- | Replace names at every given `Location` (in a given `ParsedSource`) with a given new name.
 replaceRefs ::

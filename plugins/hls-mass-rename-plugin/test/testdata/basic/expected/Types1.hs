@@ -23,5 +23,3 @@ data FulfillmentMethod
 
 useInSameModule :: Restaurant -> Text
 useInSameModule Restaurant{name} = "R:" <> name
-
-unprefixFields ''Restaurant

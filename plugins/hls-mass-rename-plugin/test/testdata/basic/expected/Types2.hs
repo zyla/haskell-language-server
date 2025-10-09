@@ -10,5 +10,3 @@ data Account = Account
   { id :: Int
   , name :: Text
   }
-
-unprefixFields ''Account

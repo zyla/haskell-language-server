@@ -25,5 +25,3 @@ data MenuItem = MenuItem
 -- Function that returns MenuSection without requiring it to be imported
 getDefaultMenuSection :: MenuSection
 getDefaultMenuSection = MenuSection "Default" "Default menu section"
-
-unprefixFields ''MenuSection
