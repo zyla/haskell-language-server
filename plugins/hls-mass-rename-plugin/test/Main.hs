@@ -93,7 +93,7 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     setEnv "APPLY" "1"
 
     -- Run mass-rename (binary is in PATH thanks to build-tool-depends)
-    (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe ["mass-rename", "src"] ""
+    (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe ["mass-rename", "--scan", "src", "--rewrite", "src"] ""
 
     -- Restore directory
     setCurrentDirectory origDir

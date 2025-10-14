@@ -87,25 +87,24 @@ descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
 type TypeMap = Map.Map GHC.RealSrcSpan [GHC.Type]
 
 exampleCli :: ParserInfo (IdeCommand IdeState)
-exampleCli = info (IdeCommand . go <$> fileArg) mempty
+exampleCli = info (IdeCommand . go <$> parser) mempty
     where
-
-    fileArg = many (argument str (metavar "FILES/DIRS..."))
-    go argFiles ide = do
+    parser = (,)
+        <$> some (strOption (long "scan" <> metavar "FILES/DIRS" <> help "Files/directories to scan for datatypes with lens-prefixed fields"))
+        <*> some (strOption (long "rewrite" <> metavar "FILES/DIRS" <> help "Files/directories to rewrite"))
+    go (scanArgs, rewriteArgs) ide = do
         -- Scan files: user-provided paths (to determine which types to refactor)
-        scanFiles <- expandFiles (argFiles ++ ["." | null argFiles])
+        scanFiles <- expandFiles scanArgs
         absoluteScanFiles <- nubOrd <$> mapM IO.canonicalizePath scanFiles
         putStrLn $ "Scanning " ++ show (length absoluteScanFiles) ++ " files for types to refactor"
 
-        -- Project files: ALL files in project (to apply transformations)
-        projectRoot <- findProjectRoot (head absoluteScanFiles)
-        putStrLn $ "Project root: " ++ projectRoot
-        allProjectFiles <- expandFiles [projectRoot]
-        absoluteProjectFiles <- nubOrd <$> mapM IO.canonicalizePath allProjectFiles
-        putStrLn $ "Found " ++ show (length absoluteProjectFiles) ++ " files in project"
+        -- Rewrite files: user-specified files to transform
+        allRewriteFiles <- expandFiles rewriteArgs
+        absoluteRewriteFiles <- nubOrd <$> mapM IO.canonicalizePath allRewriteFiles
+        putStrLn $ "Rewriting " ++ show (length absoluteRewriteFiles) ++ " files"
 
-        -- Build HIE ASTs for all project files
-        let allNfps = map toNormalizedFilePath' absoluteProjectFiles
+        -- Build HIE ASTs for all rewrite files
+        let allNfps = map toNormalizedFilePath' absoluteRewriteFiles
         setFilesOfInterest ide $ HashMap.fromList $ map (,OnDisk) allNfps
 
         asts <- runAction "GetHieAst" ide $ uses GetHieAst allNfps
@@ -122,18 +121,13 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                 putStrLn $ "Warning: No fresh HIE for " ++ show nfp ++ ", using empty typeMap"
                 pure (nfp, mempty)
 
-        -- Get ModIfaces for all project files (needed for HieDb indexing)
-        -- but only use scan files to determine which types to refactor
+        -- Get ModIfaces for scan files to determine which types to refactor
         let scanNfps = map toNormalizedFilePath' absoluteScanFiles
-        allResults <- runAction "GetModIface" ide $ uses GetModIface allNfps
-        let scanResults = zip allResults absoluteProjectFiles
-        let (allSucceeded, allFailed) = partition (isJust . fst) scanResults
-        unless (null allFailed) $
-            putStr $ unlines $ "Files that failed to get ModIface:" : map ((++) " * " . snd) allFailed
-
-        -- Filter to only scan files for finding types to refactor
-        let scanNfpSet = HS.fromList scanNfps
-        let succeeded = filter (\(_, fp) -> toNormalizedFilePath' fp `HS.member` scanNfpSet) allSucceeded
+        allResults <- runAction "GetModIface" ide $ uses GetModIface scanNfps
+        let scanResults = zip allResults absoluteScanFiles
+        let (succeeded, failed) = partition (isJust . fst) scanResults
+        unless (null failed) $
+            putStr $ unlines $ "Files that failed to get ModIface:" : map ((++) " * " . snd) failed
 
         let state = ide
 
@@ -714,29 +708,6 @@ fieldNameToString n =
     in case split (==':') ns of
         ["$sel", fieldName, _] -> fieldName
         _ -> ns
-
--- | Find the project root by walking up the directory tree looking for markers
-findProjectRoot :: FilePath -> IO FilePath
-findProjectRoot startPath = do
-    isFile <- IO.doesFileExist startPath
-    let startDir = if isFile then takeDirectory startPath else startPath
-    findUp startDir
-  where
-    findUp dir = do
-        -- Check for cabal file (any *.cabal file)
-        cabalFiles <- filter (\f -> takeExtension f == ".cabal") <$> IO.listFiles dir
-        let hasCabal = not $ null cabalFiles
-        -- Check for other project markers
-        hasStackYaml <- IO.doesFileExist (dir </> "stack.yaml")
-        hasGit <- IO.doesDirectoryExist (dir </> ".git")
-
-        if hasCabal || hasStackYaml || hasGit
-            then return dir
-            else do
-                let parent = takeDirectory dir
-                if parent == dir
-                    then return dir  -- reached filesystem root, use current dir
-                    else findUp parent
 
 expandFiles :: [FilePath] -> IO [FilePath]
 expandFiles = concatMapM $ \x -> do
