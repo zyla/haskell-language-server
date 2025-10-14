@@ -31,7 +31,7 @@ import           Control.Monad.Extra                      (concatMapM)
 import           Data.List.Extra                          (isPrefixOf, nubOrd,
                                                            partition, split, sort)
 import           System.FilePath                          (takeExtension,
-                                                           takeFileName)
+                                                           takeFileName, takeDirectory, (</>))
 import qualified Development.IDE.GHC.Compat as GHC
 import Debug.Trace
 import Control.Monad.Except (runExceptT, ExceptT)
@@ -92,34 +92,48 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
 
     fileArg = many (argument str (metavar "FILES/DIRS..."))
     go argFiles ide = do
-        files <- expandFiles (argFiles ++ ["." | null argFiles])
-        -- LSP works with absolute file paths, so try and behave similarly
-        absoluteFiles <- nubOrd <$> mapM IO.canonicalizePath files
-        putStrLn $ "Found " ++ show (length absoluteFiles) ++ " files"
+        -- Scan files: user-provided paths (to determine which types to refactor)
+        scanFiles <- expandFiles (argFiles ++ ["." | null argFiles])
+        absoluteScanFiles <- nubOrd <$> mapM IO.canonicalizePath scanFiles
+        putStrLn $ "Scanning " ++ show (length absoluteScanFiles) ++ " files for types to refactor"
 
-        let nfps = map toNormalizedFilePath' absoluteFiles
+        -- Project files: ALL files in project (to apply transformations)
+        projectRoot <- findProjectRoot
+        putStrLn $ "Project root: " ++ projectRoot
+        allProjectFiles <- expandFiles [projectRoot]
+        absoluteProjectFiles <- nubOrd <$> mapM IO.canonicalizePath allProjectFiles
+        putStrLn $ "Found " ++ show (length absoluteProjectFiles) ++ " files in project"
 
-        -- Is this necessary?
-        -- Without this we get warnings when typechecking ("Typechecked a file which is not currently open in the editor")
-        -- But with this, HLS does a lot of stuff and slows down
-        setFilesOfInterest ide $ HashMap.fromList $ map (,OnDisk) nfps
+        -- Build HIE ASTs for all project files
+        let allNfps = map toNormalizedFilePath' absoluteProjectFiles
+        setFilesOfInterest ide $ HashMap.fromList $ map (,OnDisk) allNfps
 
-        asts <- runAction "GetHieAst" ide $ uses GetHieAst nfps
-        typeMaps :: Map.Map NormalizedFilePath TypeMap <- fmap Map.fromList $ forM (zip nfps asts) \case
+        asts <- runAction "GetHieAst" ide $ uses GetHieAst allNfps
+        -- Keep all loaded HIE ASTs for cross-file reference search
+        let loadedHieAsts :: [HieAstResult]
+            loadedHieAsts = catMaybes asts
+
+        typeMaps :: Map.Map NormalizedFilePath TypeMap <- fmap Map.fromList $ forM (zip allNfps asts) \case
             (nfp, Just HAR{hieKind=HieFresh, hieAst}) -> do
                 let typeMap = Map.fromListWith (<>) $ map (fmap (:[])) $ foldMap nodeTypes $ Map.elems $ getAsts hieAst
-                putStrLn $ GHC.printWithoutUniques typeMap
                 pure (nfp, typeMap)
-            -- Just HAR{hieKind=HieFromDisk{}, hieAst} -> do
-            --     putStrLn $ GHC.printWithoutUniques hieAst
             (nfp, _) -> do
-                _ <- error $ "HIEAST not fresh: " <> show nfp
+                -- Warn but don't error - file might not have HIE info
+                putStrLn $ "Warning: No fresh HIE for " ++ show nfp ++ ", using empty typeMap"
                 pure (nfp, mempty)
 
-        results <- runAction "GetModIface" ide $ uses GetModIface (map toNormalizedFilePath' absoluteFiles)
-        let (succeeded, failed) = partition (isJust . fst) $ zip results absoluteFiles
-        unless (null failed) $
-            putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
+        -- Get ModIfaces for all project files (needed for HieDb indexing)
+        -- but only use scan files to determine which types to refactor
+        let scanNfps = map toNormalizedFilePath' absoluteScanFiles
+        allResults <- runAction "GetModIface" ide $ uses GetModIface allNfps
+        let scanResults = zip allResults absoluteProjectFiles
+        let (allSucceeded, allFailed) = partition (isJust . fst) scanResults
+        unless (null allFailed) $
+            putStr $ unlines $ "Files that failed to get ModIface:" : map ((++) " * " . snd) allFailed
+
+        -- Filter to only scan files for finding types to refactor
+        let scanNfpSet = HS.fromList scanNfps
+        let succeeded = filter (\(_, fp) -> toNormalizedFilePath' fp `HS.member` scanNfpSet) allSucceeded
 
         let state = ide
 
@@ -136,7 +150,11 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                         liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
                         pure $ (nfp,) <$> tr.fieldNames
 
-            directRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) directOldNames
+            -- Find references across all loaded HIE ASTs directly (bypassing HieDb)
+            let refsAtNameInAsts :: GHC.Name -> [Location]
+                refsAtNameInAsts name = concatMap (Rename.nameLocs name) loadedHieAsts
+
+            let directRefs = concatMap (refsAtNameInAsts . snd) directOldNames
 
             {- References in HieDB are not necessarily transitive. With `NamedFieldPuns`, we can have
                 indirect references through punned names. To find the transitive closure, we do a pass of
@@ -154,7 +172,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
                      directStrings = HashSet.fromList $ map (fieldNameToString . snd) directOldNames
                      directNames = HashSet.fromList $ map (nameHashKey .  snd) directOldNames
 
-            indirectRefs <- concat <$> mapM (\(nfp, name) -> Rename.refsAtName state nfp name) indirectOldNamesFiltered
+            let indirectRefs = concatMap (refsAtNameInAsts . snd) indirectOldNamesFiltered
 
             liftIO $ putStrLn $ "Num direct refs: " <> show (length directRefs)
             liftIO $ putStrLn $ "Num indirect refs: " <> show (length indirectRefs)
@@ -696,6 +714,28 @@ fieldNameToString n =
     in case split (==':') ns of
         ["$sel", fieldName, _] -> fieldName
         _ -> ns
+
+-- | Find the project root by walking up the directory tree looking for markers
+findProjectRoot :: IO FilePath
+findProjectRoot = do
+    cwd <- IO.getCurrentDirectory
+    findUp cwd
+  where
+    findUp dir = do
+        -- Check for cabal file (any *.cabal file)
+        cabalFiles <- filter (\f -> takeExtension f == ".cabal") <$> IO.listFiles dir
+        let hasCabal = not $ null cabalFiles
+        -- Check for other project markers
+        hasStackYaml <- IO.doesFileExist (dir </> "stack.yaml")
+        hasGit <- IO.doesDirectoryExist (dir </> ".git")
+
+        if hasCabal || hasStackYaml || hasGit
+            then return dir
+            else do
+                let parent = takeDirectory dir
+                if parent == dir
+                    then return dir  -- reached filesystem root, use current dir
+                    else findUp parent
 
 expandFiles :: [FilePath] -> IO [FilePath]
 expandFiles = concatMapM $ \x -> do

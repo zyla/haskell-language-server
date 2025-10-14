@@ -6,7 +6,7 @@
 {-# LANGUAGE RecordWildCards   #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Ide.Plugin.Rename (descriptor, E.Log, refsAtName, replaceRefs, getNamesAtPos, locToFilePos) where
+module Ide.Plugin.Rename (descriptor, E.Log, refsAtName, replaceRefs, getNamesAtPos, locToFilePos, nameLocs) where
 
 import           Control.Lens                          ((^.))
 import           Control.Monad
