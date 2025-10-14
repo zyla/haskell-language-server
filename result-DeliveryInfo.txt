@@ -1,0 +1,20 @@
+FIELD_ACCESS: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:18:33-36 | name | TypeMap=FOUND | Type=DeliveryZone | TyConApp=DeliveryZone | Match=NO
+FIELD_ACCESS: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:20:41-50 | coordinates | TypeMap=FOUND | Type=Restaurant | TyConApp=Restaurant | Match=YES
+FIELD_ACCESS: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:21:24-27 | price | TypeMap=FOUND | Type=DeliveryZone | TyConApp=DeliveryZone | Match=NO
+FIELD_ACCESS: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:22:25-28 | minimalOrderValue | TypeMap=FOUND | Type=DeliveryZone | TyConApp=DeliveryZone | Match=NO
+FIELD_ACCESS: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:23:33-36 | freeDeliveryThreshold | TypeMap=FOUND | Type=DeliveryZone | TyConApp=DeliveryZone | Match=NO
+COLLECT_FIELD_ACCESS_TYPES: Found 5 field access spans
+COLLECT_SPAN: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:18:33-36 | TypeMap=FOUND | Result=Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone
+COLLECT_SPAN: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:20:41-50 | TypeMap=FOUND | Result=Restaumatic.Restaurants.Types.Restaurant.Generated.Restaurant
+COLLECT_SPAN: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:21:24-27 | TypeMap=FOUND | Result=Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone
+COLLECT_SPAN: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:22:25-28 | TypeMap=FOUND | Result=Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone
+COLLECT_SPAN: /workspace/r/higgs-delensify-v2/apps/higgs/src/Restaumatic/Restaurants/DeliveryInfo.hs:23:33-36 | TypeMap=FOUND | Result=Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone
+COLLECT_FIELD_ACCESS_TYPES: Extracted 2 unique types: ["Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone","Restaumatic.Restaurants.Types.Restaurant.Generated.Restaurant"]
+ADD_MISSING_CONSTRUCTOR_IMPORTS: accessedTypes=["Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone","Restaumatic.Restaurants.Types.Restaurant.Generated.Restaurant"]
+HAS_CONSTRUCTOR_ACCESS: Restaumatic.Restaurants.Types.Restaurant.Generated.Restaurant | Result=NO
+  CHECK_IMPORT: module=Restaumatic.Restaurants.Types.DeliveryZone.Generated | hasImportList=False | result=NO
+HAS_CONSTRUCTOR_ACCESS: Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone | Result=NO
+ADD_MISSING_CONSTRUCTOR_IMPORTS: typesNeedingImports=["Restaumatic.Restaurants.Types.DeliveryZone.Generated.DeliveryZone","Restaumatic.Restaurants.Types.Restaurant.Generated.Restaurant"]
+ADD_MISSING_CONSTRUCTOR_IMPORTS: Modifying imports for 2 types
+MODIFY_IMPORTS: typesByModule=[(ModuleName "Restaumatic.Restaurants.Types.DeliveryZone.Generated",["DeliveryZone"]),(ModuleName "Restaumatic.Restaurants.Types.Restaurant.Generated",["Restaurant"])]
+  MODIFY_IMPORT: module=Restaumatic.Restaurants.Types.DeliveryZone.Generated | adding types=["DeliveryZone"]

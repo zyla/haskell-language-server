@@ -464,19 +464,32 @@ addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
 modifyImports :: [(GHC.ModuleName, GHC.Name)] -> [GHC.LImportDecl GHC.GhcPs] -> [GHC.LImportDecl GHC.GhcPs]
 modifyImports [] imports = imports
 modifyImports typesToAdd imports =
-    -- Group types by module
-    let typesByModule = Map.fromListWith (++) [(modName, [tyName]) | (modName, tyName) <- typesToAdd]
-        !_ = trace ("MODIFY_IMPORTS: typesByModule=" <> show (Map.toList $ Map.map (map GHC.printWithoutUniques) typesByModule)) ()
-    in map (modifyImport typesByModule) imports
+    -- Collect all type Names that need constructors (regardless of module)
+    let allTypeNames = map snd typesToAdd
+        !_ = trace ("MODIFY_IMPORTS: allTypeNames=" <> show (map GHC.printWithoutUniques allTypeNames)) ()
+    in map (modifyImport allTypeNames) imports
   where
-    modifyImport :: Map.Map GHC.ModuleName [GHC.Name] -> GHC.LImportDecl GHC.GhcPs -> GHC.LImportDecl GHC.GhcPs
-    modifyImport typeMap (GHC.L loc imp) =
-        let modName = GHC.unLoc $ GHC.ideclName imp
-        in case Map.lookup modName typeMap of
-            Nothing -> GHC.L loc imp
-            Just names ->
-                let !_ = trace ("  MODIFY_IMPORT: module=" <> GHC.printWithoutUniques modName <> " | adding types=" <> show (map GHC.printWithoutUniques names)) ()
-                in GHC.L loc (addTypesToImport names imp)
+    modifyImport :: [GHC.Name] -> GHC.LImportDecl GHC.GhcPs -> GHC.LImportDecl GHC.GhcPs
+    modifyImport allNames (GHC.L loc imp) =
+        -- Find which of the needed types are imported by this import (by OccName)
+        let matchingNames = findMatchingTypesInImport allNames imp
+        in if null matchingNames
+            then GHC.L loc imp
+            else
+                let modName = GHC.unLoc $ GHC.ideclName imp
+                    !_ = trace ("  MODIFY_IMPORT: module=" <> GHC.printWithoutUniques modName <> " | adding types=" <> show (map GHC.printWithoutUniques matchingNames)) ()
+                in GHC.L loc (addTypesToImport matchingNames imp)
+
+    -- Find which type Names from the list are imported by this import declaration
+    findMatchingTypesInImport :: [GHC.Name] -> GHC.ImportDecl GHC.GhcPs -> [GHC.Name]
+    findMatchingTypesInImport names imp =
+        case GHC.ideclImportList imp of
+            Nothing -> names  -- Open import brings all names into scope
+            Just (GHC.Exactly, GHC.L _ limports) ->
+                -- Check which names appear in the import list (by OccName)
+                let importedOccNames = Set.fromList $ mapMaybe getImportedTypeName limports
+                in filter (\n -> GHC.nameOccName n `Set.member` importedOccNames) names
+            Just (GHC.EverythingBut, _) -> []  -- Hiding list - skip
 
     addTypesToImport :: [GHC.Name] -> GHC.ImportDecl GHC.GhcPs -> GHC.ImportDecl GHC.GhcPs
     addTypesToImport names imp =

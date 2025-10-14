@@ -119,6 +119,8 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             [ "Types1.hs"
             , "Types2.hs"
             , "Types4.hs"
+            , "Types5.hs"
+            , "Types5Internal.hs"
             , "Use.hs"
             , "UseSelector.hs"
             , "UseWithoutConstructor.hs"
@@ -126,6 +128,7 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             , "UseMultipleConstructors.hs"
             , "UseWithConstructor.hs"
             , "UseWithOpenImport.hs"
+            , "UseReexport.hs"
             ]
 
     forM_ filesToCheck $ \file -> do

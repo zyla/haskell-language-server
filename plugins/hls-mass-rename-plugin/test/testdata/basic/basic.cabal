@@ -13,6 +13,8 @@ library
       Types2
       Types3
       Types4
+      Types5
+      Types5Internal
       Use
       UseSelector
       UseWithConstructor
@@ -20,6 +22,7 @@ library
       UseWithoutConstructor
       UsePartialImport
       UseMultipleConstructors
+      UseReexport
       PrefixedFields
   hs-source-dirs:
       src

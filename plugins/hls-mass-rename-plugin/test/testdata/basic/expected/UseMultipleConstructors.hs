@@ -1,6 +1,6 @@
 module UseMultipleConstructors where
 
-import Types4 (getDefaultString, TypeB(..), TypeC(..), TypeD(..))
+import Types4 (getDefaultString)
 import qualified Types4
 
 -- Test case for multiple constructor imports being ADDED at once
