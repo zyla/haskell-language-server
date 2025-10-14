@@ -124,9 +124,8 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
             , "UseWithoutConstructor.hs"
             , "UsePartialImport.hs"
             , "UseMultipleConstructors.hs"
-            -- TODO: Debug why UseWithConstructor and UseWithOpenImport aren't being transformed
-            -- , "UseWithConstructor.hs"
-            -- , "UseWithOpenImport.hs"
+            , "UseWithConstructor.hs"
+            , "UseWithOpenImport.hs"
             ]
 
     forM_ filesToCheck $ \file -> do

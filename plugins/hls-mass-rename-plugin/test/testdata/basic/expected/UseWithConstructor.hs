@@ -6,7 +6,7 @@ module UseWithConstructor where
 
 import Data.Text (Text)
 import qualified Data.Text as T
--- Constructor already imported - unchanged
+-- Constructor already imported - should not change
 import Types1 (Restaurant(..))
 import Types2 (Account(..))
 

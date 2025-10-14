@@ -6,7 +6,7 @@ module UseWithOpenImport where
 
 import Data.Text (Text)
 import qualified Data.Text as T
--- Open import - unchanged
+-- Open import - everything is already accessible, should not change
 import Types1
 import Types2
 

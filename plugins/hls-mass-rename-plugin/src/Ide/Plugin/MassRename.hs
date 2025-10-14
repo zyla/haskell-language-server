@@ -174,35 +174,24 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
             let newName = rewriteOccName stripLensPrefix
                 stripLensPrefix ('_':xs) = xs
                 stripLensPrefix xs = xs
-                filesRefs = collectWith (._uri) refs
-                getFileEdit (uri, locations) = do
-                    liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
-                    nfp <- getNormalizedFilePathE uri
-                    let typeMap = fromMaybe mempty $ Map.lookup nfp typeMaps
+                -- Create a map from URI to reference locations for efficient lookup
+                refsMap = Map.fromList $ collectWith (._uri) refs
+
+                -- Process ALL files from typeMaps, applying all transformations
+                -- (not just files with HIE references)
+                getFileEdit (nfp, typeMap) = do
+                    let uri = fromNormalizedUri $ filePathToUri' nfp
+                    let locations = fromMaybe HS.empty $ Map.lookup uri refsMap
+                    when (not $ HS.null locations) $
+                        liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
                     !x <- getSrcEdit ide uri (\lb ->
                         addMissingConstructorImports typeMap .
                         removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
                         replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
                     pure x
-            fileEdits <- mapM getFileEdit filesRefs
 
-            -- Also process files that don't have old field references but still need constructor imports
-            -- (e.g., files already using new field names via TH HasField)
-            processedNfpsIO <- mapM (\(uri, _) -> getNormalizedFilePathE uri) filesRefs
-            let processedNfps = HashSet.fromList processedNfpsIO
-                additionalFiles = [(nfp, typeMap) | (nfp, typeMap) <- Map.toList typeMaps
-                                  , not (nfp `HashSet.member` processedNfps)]
-            let getAdditionalFileEdit (nfp, typeMap) = do
-                    let uri = fromNormalizedUri $ filePathToUri' nfp
-                    !x <- getSrcEdit ide uri (\_ ps ->
-                        addMissingConstructorImports typeMap .
-                        removeUnprefixFieldsCalls refactoredTypeNames $
-                        ps)
-                    pure x
-            additionalEdits <- mapM getAdditionalFileEdit additionalFiles
-
-            let allEdits = fileEdits <> additionalEdits
+            allEdits <- mapM getFileEdit (Map.toList typeMaps)
 
             liftIO $ putStrLn "DIFF:"
             forM_ allEdits \edit -> do
