@@ -98,7 +98,7 @@ exampleCli = info (IdeCommand . go <$> fileArg) mempty
         putStrLn $ "Scanning " ++ show (length absoluteScanFiles) ++ " files for types to refactor"
 
         -- Project files: ALL files in project (to apply transformations)
-        projectRoot <- findProjectRoot
+        projectRoot <- findProjectRoot (head absoluteScanFiles)
         putStrLn $ "Project root: " ++ projectRoot
         allProjectFiles <- expandFiles [projectRoot]
         absoluteProjectFiles <- nubOrd <$> mapM IO.canonicalizePath allProjectFiles
@@ -716,10 +716,11 @@ fieldNameToString n =
         _ -> ns
 
 -- | Find the project root by walking up the directory tree looking for markers
-findProjectRoot :: IO FilePath
-findProjectRoot = do
-    cwd <- IO.getCurrentDirectory
-    findUp cwd
+findProjectRoot :: FilePath -> IO FilePath
+findProjectRoot startPath = do
+    isFile <- IO.doesFileExist startPath
+    let startDir = if isFile then takeDirectory startPath else startPath
+    findUp startDir
   where
     findUp dir = do
         -- Check for cabal file (any *.cabal file)
