@@ -271,42 +271,84 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceEx
     replaceExpr :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
     replaceExpr = \case
         x@GHC.HsGetField { GHC.gf_expr = L srcSpan _, GHC.gf_field = L gfSpan gf_field@(GHC.DotFieldOcc { GHC.dfoLabel = label }) }
-            | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
-            , Just (ty:_) <- Map.lookup recordExprLoc typeMap
-            , GHC.TyConApp tyCon _ <- ty
-            , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
-            ->
-                    trace ("record lookup " <> GHC.printWithoutUniques label <> " at type " <> GHC.printWithoutUniques ty)
-                    x { GHC.gf_field = L gfSpan (gf_field { GHC.dfoLabel = rewriteFieldLabelString <$> label }) }
+            -> let
+                debugInfo = case GHC.locA srcSpan of
+                    GHC.RealSrcSpan recordExprLoc _ ->
+                        let typeMapLookup = Map.lookup recordExprLoc typeMap
+                            (typeStr, tyConStr, matches) = case typeMapLookup of
+                                Just (ty:_) | GHC.TyConApp tyCon _ <- ty ->
+                                    let tyName = GHC.getName tyCon
+                                        matchesTy = HS.member (HashableName tyName) typesToRefactor
+                                    in (GHC.printWithoutUniques ty, GHC.printWithoutUniques tyName, matchesTy)
+                                Just (ty:_) -> (GHC.printWithoutUniques ty, "NO_TYCONAPP", False)
+                                Just [] -> ("EMPTY_LIST", "NO", False)
+                                Nothing -> ("NOT_FOUND", "NO", False)
+                            typeMapStr = if isJust typeMapLookup then "FOUND" else "NOT_FOUND"
+                            matchStr = if matches then "YES" else "NO"
+                        in Just ("FIELD_ACCESS: " <> GHC.printWithoutUniques recordExprLoc <> " | " <> GHC.printWithoutUniques label <> " | TypeMap=" <> typeMapStr <> " | Type=" <> typeStr <> " | TyConApp=" <> tyConStr <> " | Match=" <> matchStr)
+                    _ -> Nothing
+                !_ = case debugInfo of
+                    Just msg -> trace msg ()
+                    Nothing -> ()
+               in case GHC.locA srcSpan of
+                    GHC.RealSrcSpan recordExprLoc _
+                        | Just (ty:_) <- Map.lookup recordExprLoc typeMap
+                        , GHC.TyConApp tyCon _ <- ty
+                        , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+                        -> x { GHC.gf_field = L gfSpan (gf_field { GHC.dfoLabel = rewriteFieldLabelString <$> label }) }
+                    _ -> x
 
         x@GHC.RecordUpd { GHC.rupd_expr = L srcSpan _, GHC.rupd_flds = fields }
-            | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
-            , Just (ty:_) <- Map.lookup recordExprLoc typeMap
-            , GHC.TyConApp tyCon _ <- ty
-            , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
-            ->
-                    let updatedFields =
-                            case fields of
-                                Right _fields' ->
-                                    error ("overloaded record update at type " <> GHC.printWithoutUniques ty <> "@" <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan)))
-                                    -- Right (map (fmap
-                                    --     (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
-                                    --         field { GHC.hfbLHS = fmap (\(GHC.FieldLabelStrings labels) ->
-                                    --             GHC.FieldLabelStrings (fmap (fmap
-                                    --                 (\dfo@GHC.DotFieldOcc{GHC.dfoLabel = label} -> dfo { GHC.dfoLabel = rewriteFieldLabelString <$> label })
-                                    --             ) labels)) lhs })
-                                    -- ) fields')
-                                Left fields' ->
-                                    trace ("normal record update at type " <> GHC.printWithoutUniques ty <> "@" <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan))) $
-                                    Left (map (fmap
-                                        (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
-                                            field { GHC.hfbLHS = fmap (\case
-                                                GHC.Ambiguous x rdrName -> GHC.Ambiguous x $ fmap rewriteRdrName rdrName
-                                                GHC.Unambiguous x rdrName -> GHC.Unambiguous x $ fmap rewriteRdrName rdrName
-                                            ) lhs })
-                                    ) fields')
+            -> let
+                getFieldNames = case fields of
+                    Left fields' -> show (length fields') <> " fields"
+                    Right _fields' -> "overloaded fields"
+                debugInfo = case GHC.locA srcSpan of
+                    GHC.RealSrcSpan recordExprLoc _ ->
+                        let typeMapLookup = Map.lookup recordExprLoc typeMap
+                            (typeStr, tyConStr, matches) = case typeMapLookup of
+                                Just (ty:_) | GHC.TyConApp tyCon _ <- ty ->
+                                    let tyName = GHC.getName tyCon
+                                        matchesTy = HS.member (HashableName tyName) typesToRefactor
+                                    in (GHC.printWithoutUniques ty, GHC.printWithoutUniques tyName, matchesTy)
+                                Just (ty:_) -> (GHC.printWithoutUniques ty, "NO_TYCONAPP", False)
+                                Just [] -> ("EMPTY_LIST", "NO", False)
+                                Nothing -> ("NOT_FOUND", "NO", False)
+                            typeMapStr = if isJust typeMapLookup then "FOUND" else "NOT_FOUND"
+                            matchStr = if matches then "YES" else "NO"
+                        in Just ("RECORD_UPDATE: " <> GHC.printWithoutUniques recordExprLoc <> " | " <> getFieldNames <> " | TypeMap=" <> typeMapStr <> " | Type=" <> typeStr <> " | TyConApp=" <> tyConStr <> " | Match=" <> matchStr)
+                    _ -> Nothing
+                !_ = case debugInfo of
+                    Just msg -> trace msg ()
+                    Nothing -> ()
+               in case GHC.locA srcSpan of
+                    GHC.RealSrcSpan recordExprLoc _
+                        | Just (ty:_) <- Map.lookup recordExprLoc typeMap
+                        , GHC.TyConApp tyCon _ <- ty
+                        , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+                        ->
+                            let updatedFields =
+                                    case fields of
+                                        Right _fields' ->
+                                            error ("overloaded record update at type " <> GHC.printWithoutUniques ty <> "@" <> ppLocWithFileName (unsafeSrcSpanToLoc (GHC.locA srcSpan)))
+                                            -- Right (map (fmap
+                                            --     (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
+                                            --         field { GHC.hfbLHS = fmap (\(GHC.FieldLabelStrings labels) ->
+                                            --             GHC.FieldLabelStrings (fmap (fmap
+                                            --                 (\dfo@GHC.DotFieldOcc{GHC.dfoLabel = label} -> dfo { GHC.dfoLabel = rewriteFieldLabelString <$> label })
+                                            --             ) labels)) lhs })
+                                            -- ) fields')
+                                        Left fields' ->
+                                            Left (map (fmap
+                                                (\field@GHC.HsFieldBind{GHC.hfbLHS = lhs} ->
+                                                    field { GHC.hfbLHS = fmap (\case
+                                                        GHC.Ambiguous x rdrName -> GHC.Ambiguous x $ fmap rewriteRdrName rdrName
+                                                        GHC.Unambiguous x rdrName -> GHC.Unambiguous x $ fmap rewriteRdrName rdrName
+                                                    ) lhs })
+                                            ) fields')
 
-                    in x { GHC.rupd_flds = updatedFields }
+                            in x { GHC.rupd_flds = updatedFields }
+                    _ -> x
 
         x -> x
 
@@ -323,15 +365,21 @@ getTyConModule _ = Nothing
 collectFieldAccessTypes :: TypeMap -> ParsedSource -> Set (GHC.ModuleName, GHC.Name)
 collectFieldAccessTypes typeMap ps =
     let spans = collectFieldAccesses ps
+        !_ = trace ("COLLECT_FIELD_ACCESS_TYPES: Found " <> show (length spans) <> " field access spans") ()
         types = mapMaybe extractType spans
-    in Set.fromList types
+        result = Set.fromList types
+        !_ = trace ("COLLECT_FIELD_ACCESS_TYPES: Extracted " <> show (Set.size result) <> " unique types: " <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList result))) ()
+    in result
   where
     extractType :: GHC.RealSrcSpan -> Maybe (GHC.ModuleName, GHC.Name)
     extractType srcSpan =
-        case Map.lookup srcSpan typeMap of
-            Nothing -> Nothing
-            Just [] -> Nothing
-            Just (ty:_) -> getTyConModule ty
+        let lookupResult = Map.lookup srcSpan typeMap
+            result = case lookupResult of
+                Nothing -> Nothing
+                Just [] -> Nothing
+                Just (ty:_) -> getTyConModule ty
+            !_ = trace ("COLLECT_SPAN: " <> GHC.printWithoutUniques srcSpan <> " | TypeMap=" <> (if isJust lookupResult then "FOUND" else "NOT_FOUND") <> " | Result=" <> maybe "NONE" (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) result) ()
+        in result
 
     collectFieldAccesses :: Data a => a -> [GHC.RealSrcSpan]
     collectFieldAccesses = everything (++) (mkQ [] getFieldAccessSpan)
@@ -357,18 +405,22 @@ getIEName (GHC.IEType _ (GHC.L _ rdrName)) = GHC.rdrNameOcc rdrName
 --   from the given import declarations
 hasConstructorAccess :: GHC.ModuleName -> GHC.Name -> [GHC.LImportDecl GHC.GhcPs] -> Bool
 hasConstructorAccess targetModule targetName imports =
-    any checkImport imports
+    let result = any checkImport imports
+        !_ = trace ("HAS_CONSTRUCTOR_ACCESS: " <> GHC.printWithoutUniques targetModule <> "." <> GHC.printWithoutUniques targetName <> " | Result=" <> if result then "YES" else "NO") ()
+    in result
   where
     checkImport :: GHC.LImportDecl GHC.GhcPs -> Bool
     checkImport (GHC.L _ imp)
         | GHC.unLoc (GHC.ideclName imp) == targetModule =
-            case GHC.ideclImportList imp of
-                -- No import list means everything is imported (if not qualified-only)
-                Nothing -> GHC.ideclQualified imp /= GHC.QualifiedPre && GHC.ideclQualified imp /= GHC.QualifiedPost
-                -- Check if type with constructors is in import list
-                Just (GHC.Exactly, limports) ->
-                    any (hasTypeConstructor targetName) (map GHC.unLoc (GHC.unLoc limports))
-                Just (GHC.EverythingBut, _) -> False  -- Hiding list - too complex
+            let result = case GHC.ideclImportList imp of
+                    -- No import list means everything is imported (if not qualified-only)
+                    Nothing -> GHC.ideclQualified imp /= GHC.QualifiedPre && GHC.ideclQualified imp /= GHC.QualifiedPost
+                    -- Check if type with constructors is in import list
+                    Just (GHC.Exactly, limports) ->
+                        any (hasTypeConstructor targetName) (map GHC.unLoc (GHC.unLoc limports))
+                    Just (GHC.EverythingBut, _) -> False  -- Hiding list - too complex
+                !_ = trace ("  CHECK_IMPORT: module=" <> GHC.printWithoutUniques (GHC.unLoc (GHC.ideclName imp)) <> " | hasImportList=" <> show (isJust (GHC.ideclImportList imp)) <> " | result=" <> if result then "YES" else "NO") ()
+            in result
         | otherwise = False
 
     hasTypeConstructor :: GHC.Name -> GHC.IE GHC.GhcPs -> Bool
@@ -390,15 +442,20 @@ hasConstructorAccess targetModule targetName imports =
 addMissingConstructorImports :: TypeMap -> ParsedSource -> ParsedSource
 addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
     let accessedTypes = collectFieldAccessTypes typeMap ps
+        !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: accessedTypes=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList accessedTypes))) ()
         imports = GHC.hsmodImports hsModule
 
         -- Find types that need constructor imports
         typesNeedingImports = Set.filter
             (\(modName, tyName) -> not $ hasConstructorAccess modName tyName imports)
             accessedTypes
+        !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: typesNeedingImports=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList typesNeedingImports))) ()
 
         -- Modify imports to add constructors
         modifiedImports = modifyImports (Set.toList typesNeedingImports) imports
+        !_ = if Set.null typesNeedingImports
+            then trace "ADD_MISSING_CONSTRUCTOR_IMPORTS: No changes needed" ()
+            else trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: Modifying imports for " <> show (Set.size typesNeedingImports) <> " types") ()
     in if Set.null typesNeedingImports
         then ps  -- No changes needed
         else GHC.L loc (hsModule { GHC.hsmodImports = modifiedImports })
@@ -409,13 +466,17 @@ modifyImports [] imports = imports
 modifyImports typesToAdd imports =
     -- Group types by module
     let typesByModule = Map.fromListWith (++) [(modName, [tyName]) | (modName, tyName) <- typesToAdd]
+        !_ = trace ("MODIFY_IMPORTS: typesByModule=" <> show (Map.toList $ Map.map (map GHC.printWithoutUniques) typesByModule)) ()
     in map (modifyImport typesByModule) imports
   where
     modifyImport :: Map.Map GHC.ModuleName [GHC.Name] -> GHC.LImportDecl GHC.GhcPs -> GHC.LImportDecl GHC.GhcPs
     modifyImport typeMap (GHC.L loc imp) =
-        case Map.lookup (GHC.unLoc $ GHC.ideclName imp) typeMap of
+        let modName = GHC.unLoc $ GHC.ideclName imp
+        in case Map.lookup modName typeMap of
             Nothing -> GHC.L loc imp
-            Just names -> GHC.L loc (addTypesToImport names imp)
+            Just names ->
+                let !_ = trace ("  MODIFY_IMPORT: module=" <> GHC.printWithoutUniques modName <> " | adding types=" <> show (map GHC.printWithoutUniques names)) ()
+                in GHC.L loc (addTypesToImport names imp)
 
     addTypesToImport :: [GHC.Name] -> GHC.ImportDecl GHC.GhcPs -> GHC.ImportDecl GHC.GhcPs
     addTypesToImport names imp =
