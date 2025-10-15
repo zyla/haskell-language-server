@@ -498,8 +498,12 @@ modifyImports typesToAdd imports =
     findTypesImportedByOccName names imp =
         case GHC.ideclImportList imp of
             Nothing ->
-                -- Open import: all names are imported
-                names
+                -- No import list - could be open import or qualified import
+                -- Qualified imports: constructors already accessible qualified, no need to add
+                -- Open imports: all names need constructors added
+                if GHC.ideclQualified imp == GHC.NotQualified
+                    then names  -- Open import: all names are imported and need constructors
+                    else []     -- Qualified import: constructors already accessible qualified
             Just (GHC.Exactly, GHC.L _ limports) ->
                 -- Check which names appear in the import list (by OccName)
                 let importedOccNames = Set.fromList $ mapMaybe getImportedTypeName limports
