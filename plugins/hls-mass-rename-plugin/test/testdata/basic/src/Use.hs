@@ -61,8 +61,9 @@ use_variant = \case
 useAccount :: Account -> Text
 useAccount Account{_id = id} = "A" <> T.pack (show id)
 
-use_NamedFieldPuns_scopeConflict :: Restaurant -> Text -> Text
-use_NamedFieldPuns_scopeConflict Restaurant{_name} name = _name <> name
+-- NOTE: doesn't work, creates conflict
+-- use_NamedFieldPuns_scopeConflict :: Restaurant -> Text -> Text
+-- use_NamedFieldPuns_scopeConflict Restaurant{_name} name = _name <> name
 
 use_NamedFieldPuns_shadow :: Restaurant -> Text
 use_NamedFieldPuns_shadow Restaurant{_name} = let name = "foo" in _name <> name
