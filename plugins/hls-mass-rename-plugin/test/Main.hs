@@ -135,3 +135,24 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
                 Nothing ->
                     -- Normal mode: fail with diff
                     assertFailure $ "File " ++ file ++ " differs from expected:\n" ++ diffOutput
+
+    -- Verify transformed files compile
+    setCurrentDirectory tmpDir
+
+    -- Clean build artifacts to force recompilation of transformed files
+    _ <- readProcessWithExitCode "rm" ["-rf", "dist-newstyle"] ""
+
+    -- Build the transformed project
+    (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["build"] ""
+
+    -- Restore directory
+    setCurrentDirectory origDir
+
+    -- Check that build succeeded
+    case buildExitCode of
+        ExitSuccess -> pure ()
+        ExitFailure code -> assertFailure $
+            "Transformed files failed to compile (exit code " ++ show code ++ ")\n" ++
+            "This indicates the transformation produced invalid Haskell code.\n" ++
+            "Stdout: " ++ buildStdout ++ "\n" ++
+            "Stderr: " ++ buildStderr
