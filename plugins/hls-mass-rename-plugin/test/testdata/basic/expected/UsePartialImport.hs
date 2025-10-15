@@ -1,6 +1,6 @@
 module UsePartialImport where
 
-import Types3 (getDefaultMenuSection)
+import Types3 (getDefaultMenuSection, MenuSection(..))
 
 useMenuSection :: String
 useMenuSection =
