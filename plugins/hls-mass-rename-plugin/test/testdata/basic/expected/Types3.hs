@@ -6,19 +6,19 @@ module Types3 where
 import PrefixedFields (unprefixFields)
 
 data SectionContent = SectionContent
-  { _items :: [String]
+  { items :: [String]
   }
   deriving (Show, Eq)
 
 data MenuSection = MenuSection
-  { _title :: String
-  , _description :: String
+  { title :: String
+  , description :: String
   }
   deriving (Show, Eq)
 
 data MenuItem = MenuItem
-  { _label :: String
-  , _price :: Int
+  { label :: String
+  , price :: Int
   }
   deriving (Show, Eq)
 

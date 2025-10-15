@@ -3,7 +3,7 @@
 module Main (main) where
 
 import Control.Monad (forM_, unless)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, getCurrentDirectory, setCurrentDirectory, copyPermissions)
 import System.Environment (lookupEnv, setEnv)
@@ -114,22 +114,9 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     -- Check if we should accept golden files (update expected outputs)
     acceptGolden <- lookupEnv "ACCEPT"
 
-    -- Compare output files with expected (only files that compile)
-    let filesToCheck =
-            [ "Types1.hs"
-            , "Types2.hs"
-            , "Types4.hs"
-            , "Types5.hs"
-            , "Types5Internal.hs"
-            , "Use.hs"
-            , "UseSelector.hs"
-            , "UseWithoutConstructor.hs"
-            , "UsePartialImport.hs"
-            , "UseMultipleConstructors.hs"
-            , "UseWithConstructor.hs"
-            , "UseWithOpenImport.hs"
-            , "UseReexport.hs"
-            ]
+    -- Discover all .hs files in src directory
+    srcFiles <- listDirectory (tmpDir </> "src")
+    let filesToCheck = filter (".hs" `isSuffixOf`) srcFiles
 
     forM_ filesToCheck $ \file -> do
         let actualPath = tmpDir </> "src" </> file
