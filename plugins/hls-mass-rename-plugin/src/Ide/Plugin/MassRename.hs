@@ -447,6 +447,10 @@ addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
         !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: accessedTypes=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList accessedTypes))) ()
         imports = GHC.hsmodImports hsModule
 
+        -- Get current module name to prevent self-imports
+        currentModuleName = fmap GHC.unLoc (GHC.hsmodName hsModule)
+        !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: currentModule=" <> maybe "NONE" GHC.printWithoutUniques currentModuleName) ()
+
         -- Find types that need constructor imports
         typesNeedingImports = Set.filter
             (\(modName, tyName) -> not $ hasConstructorAccess modName tyName imports)
@@ -454,7 +458,7 @@ addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
         !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: typesNeedingImports=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList typesNeedingImports))) ()
 
         -- Modify imports to add constructors
-        modifiedImports = modifyImports (Set.toList typesNeedingImports) imports
+        modifiedImports = modifyImports currentModuleName (Set.toList typesNeedingImports) imports
         !_ = if Set.null typesNeedingImports
             then trace "ADD_MISSING_CONSTRUCTOR_IMPORTS: No changes needed" ()
             else trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: Modifying imports for " <> show (Set.size typesNeedingImports) <> " types") ()
@@ -463,13 +467,13 @@ addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
         else GHC.L loc (hsModule { GHC.hsmodImports = modifiedImports })
 
 -- | Modify import declarations to add missing constructor imports
-modifyImports :: [(GHC.ModuleName, GHC.Name)] -> [GHC.LImportDecl GHC.GhcPs] -> [GHC.LImportDecl GHC.GhcPs]
-modifyImports [] imports = imports
-modifyImports typesToAdd imports =
+modifyImports :: Maybe GHC.ModuleName -> [(GHC.ModuleName, GHC.Name)] -> [GHC.LImportDecl GHC.GhcPs] -> [GHC.LImportDecl GHC.GhcPs]
+modifyImports _ [] imports = imports
+modifyImports currentModule typesToAdd imports =
     -- Two-phase approach:
     -- 1. Match by OccName (handles re-exports: if Account from Types5Internal is imported via Types5)
     -- 2. Match by module name (handles new imports: if MenuSection needs to be added to Types3 import)
-    -- 3. Create new import lines for modules that aren't imported at all
+    -- 3. Create new import lines for modules that aren't imported at all (excluding current module)
     let allTypeNames = map snd typesToAdd
         typesByModule = Map.fromListWith (++) [(mod, [name]) | (mod, name) <- typesToAdd]
         !_ = trace ("MODIFY_IMPORTS: allTypeNames=" <> show (map GHC.printWithoutUniques allTypeNames)) ()
@@ -482,9 +486,15 @@ modifyImports typesToAdd imports =
         typesHandledByOccName = Set.fromList $ concatMap (\imp -> findTypesImportedByOccName allTypeNames (GHC.unLoc imp)) imports
 
         -- Find modules that need types but aren't imported yet
-        -- Exclude types that were already handled by OccName matching in existing imports
+        -- Exclude:
+        -- 1. Modules already imported
+        -- 2. The current module (to prevent self-imports)
+        -- 3. Types that were already handled by OccName matching in existing imports
         modulesNeedingImports = Map.map (\names -> filter (\n -> not $ n `Set.member` typesHandledByOccName) names) $
-            Map.filterWithKey (\modName _ -> not $ modName `Set.member` importedModules) typesByModule
+            Map.filterWithKey (\modName _ ->
+                not (modName `Set.member` importedModules) &&  -- Not already imported
+                Just modName /= currentModule                   -- Not the current module (prevent self-import)
+            ) typesByModule
         -- Remove empty entries (all types were handled by OccName)
         modulesNeedingImportsFiltered = Map.filter (not . null) modulesNeedingImports
 
