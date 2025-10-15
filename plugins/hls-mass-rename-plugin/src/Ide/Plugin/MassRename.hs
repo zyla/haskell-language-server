@@ -77,6 +77,7 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import Development.IDE.GHC.ExactPrint (setPrecedingLines, epl)
 import Control.Lens (_last, over)
+import GHC.Types.PkgQual (RawPkgQual(NoRawPkgQual))
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -468,11 +469,35 @@ modifyImports typesToAdd imports =
     -- Two-phase approach:
     -- 1. Match by OccName (handles re-exports: if Account from Types5Internal is imported via Types5)
     -- 2. Match by module name (handles new imports: if MenuSection needs to be added to Types3 import)
+    -- 3. Create new import lines for modules that aren't imported at all
     let allTypeNames = map snd typesToAdd
         typesByModule = Map.fromListWith (++) [(mod, [name]) | (mod, name) <- typesToAdd]
         !_ = trace ("MODIFY_IMPORTS: allTypeNames=" <> show (map GHC.printWithoutUniques allTypeNames)) ()
         !_ = trace ("MODIFY_IMPORTS: typesByModule=" <> show (Map.mapKeys GHC.printWithoutUniques $ fmap (map GHC.printWithoutUniques) typesByModule)) ()
-    in map (modifyImport allTypeNames typesByModule) imports
+
+        -- Get set of all modules currently imported
+        importedModules = Set.fromList $ map (GHC.unLoc . GHC.ideclName . GHC.unLoc) imports
+
+        -- Collect all types that were handled by OccName matching in existing imports
+        typesHandledByOccName = Set.fromList $ concatMap (\imp -> findTypesImportedByOccName allTypeNames (GHC.unLoc imp)) imports
+
+        -- Find modules that need types but aren't imported yet
+        -- Exclude types that were already handled by OccName matching in existing imports
+        modulesNeedingImports = Map.map (\names -> filter (\n -> not $ n `Set.member` typesHandledByOccName) names) $
+            Map.filterWithKey (\modName _ -> not $ modName `Set.member` importedModules) typesByModule
+        -- Remove empty entries (all types were handled by OccName)
+        modulesNeedingImportsFiltered = Map.filter (not . null) modulesNeedingImports
+
+        -- Modify existing imports
+        modifiedImports = map (modifyImport allTypeNames typesByModule) imports
+
+        -- Create new import declarations for modules not yet imported
+        newImports = map (createNewImport typesByModule) (Map.toList modulesNeedingImportsFiltered)
+
+        !_ = if Map.null modulesNeedingImportsFiltered
+            then trace "MODIFY_IMPORTS: No new imports needed" ()
+            else trace ("MODIFY_IMPORTS: Creating " <> show (Map.size modulesNeedingImportsFiltered) <> " new import(s): " <> show (map GHC.printWithoutUniques (Map.keys modulesNeedingImportsFiltered))) ()
+    in modifiedImports ++ newImports
   where
     modifyImport :: [GHC.Name] -> Map.Map GHC.ModuleName [GHC.Name] -> GHC.LImportDecl GHC.GhcPs -> GHC.LImportDecl GHC.GhcPs
     modifyImport allNames typesByModule (GHC.L loc imp) =
@@ -643,6 +668,31 @@ modifyImports typesToAdd imports =
                          ]
             ext = EpAnn (spanAsAnchor GHC.noSrcSpan) dotdotAnns emptyComments
         in GHC.noLocA (GHC.IEThingAll ext (GHC.noLocA ieName))
+
+    -- Create a completely new import declaration for a module
+    createNewImport :: Map.Map GHC.ModuleName [GHC.Name] -> (GHC.ModuleName, [GHC.Name]) -> GHC.LImportDecl GHC.GhcPs
+    createNewImport typesByModule (modName, typeNames) =
+        let -- Create import items for each type
+            importItems = map makeIEThingAll typeNames
+            -- Create the import declaration
+            importDecl = GHC.ImportDecl
+                { GHC.ideclExt = GHC.XImportDeclPass
+                    { GHC.ideclAnn = EpAnnNotUsed
+                    , GHC.ideclSourceText = GHC.NoSourceText
+                    , GHC.ideclImplicit = False
+                    }
+                , GHC.ideclName = GHC.noLocA modName
+                , GHC.ideclPkgQual = NoRawPkgQual
+                , GHC.ideclSource = GHC.NotBoot
+                , GHC.ideclSafe = False
+                , GHC.ideclQualified = GHC.NotQualified
+                , GHC.ideclAs = Nothing
+                , GHC.ideclImportList = Just (GHC.Exactly, GHC.noLocA importItems)
+                }
+            -- Add proper spacing for the new import (1 line before, 0 columns)
+            limportDecl = setPrecedingLines (GHC.noLocA importDecl) 1 0
+            !_ = trace ("  CREATE_NEW_IMPORT: module=" <> GHC.printWithoutUniques modName <> " | types=" <> show (map GHC.printWithoutUniques typeNames)) ()
+        in limportDecl
 
 -- | Remove `unprefixFields ''TypeName` declarations for types being refactored
 --   Since we're removing the field prefixes, the unprefixFields TH calls are no longer needed
