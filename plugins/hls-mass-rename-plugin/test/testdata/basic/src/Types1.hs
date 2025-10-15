@@ -25,3 +25,6 @@ useInSameModule :: Restaurant -> Text
 useInSameModule Restaurant{_name} = "R:" <> _name
 
 unprefixFields ''Restaurant
+
+useInSameModuleDot :: Restaurant -> Text
+useInSameModuleDot r = "R:" <> r.name

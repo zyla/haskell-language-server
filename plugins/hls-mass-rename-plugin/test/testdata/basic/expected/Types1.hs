@@ -23,3 +23,6 @@ data FulfillmentMethod
 
 useInSameModule :: Restaurant -> Text
 useInSameModule Restaurant{name} = "R:" <> name
+
+useInSameModuleDot :: Restaurant -> Text
+useInSameModuleDot r = "R:" <> r.name
