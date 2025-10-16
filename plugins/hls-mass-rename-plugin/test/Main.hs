@@ -2,7 +2,7 @@
 
 module Main (main) where
 
-import Control.Monad (forM_, unless)
+import Control.Monad (forM, forM_, unless)
 import Data.List (isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, getCurrentDirectory, setCurrentDirectory, copyPermissions)
@@ -118,7 +118,8 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     srcFiles <- listDirectory (tmpDir </> "src")
     let filesToCheck = filter (".hs" `isSuffixOf`) srcFiles
 
-    forM_ filesToCheck $ \file -> do
+    -- Collect all failures instead of stopping at the first one
+    failures <- fmap concat $ forM filesToCheck $ \file -> do
         let actualPath = tmpDir </> "src" </> file
             expectedPath = expectedDir </> file
 
@@ -126,15 +127,20 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
         (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
 
         case exitCode of
-            ExitSuccess -> pure ()  -- Files match
+            ExitSuccess -> pure []  -- Files match
             _ -> case acceptGolden of
                 Just _ -> do
                     -- Accept mode: update expected file with actual output
                     copyFile actualPath expectedPath
                     putStrLn $ "✓ Accepted golden file: " ++ file
+                    pure []
                 Nothing ->
-                    -- Normal mode: fail with diff
-                    assertFailure $ "File " ++ file ++ " differs from expected:\n" ++ diffOutput
+                    -- Normal mode: collect diff for reporting
+                    pure ["File " ++ file ++ " differs from expected:\n" ++ diffOutput]
+
+    -- Report all failures at once
+    unless (null failures) $
+        assertFailure $ unlines failures
 
     -- Verify transformed files compile
     setCurrentDirectory tmpDir
