@@ -139,16 +139,7 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                         fmap (toNormalizedFilePath' fp,) (findTypesToRefactor mod)
                     _ -> []
 
-            -- All types from scan (used for field access rewriting and imports)
             let refactoredTypeNames = HS.fromList $ HashableName . (.name) . snd <$> typesToRefactor
-
-            -- Filter to only types defined in files being rewritten (for unprefixFields removal)
-            let absoluteRewriteFilesSet = Set.fromList absoluteRewriteFiles
-            let typesDefinedInRewriteFiles =
-                    [ tr | (nfp, tr) <- typesToRefactor
-                         , fromNormalizedFilePath nfp `Set.member` absoluteRewriteFilesSet ]
-            let typesDefinedInRewriteFilesNames =
-                    HS.fromList $ HashableName . (.name) <$> typesDefinedInRewriteFiles
 
             directOldNames <-
                     fmap concat $ forM typesToRefactor \(nfp, tr) -> do
@@ -209,7 +200,7 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                         liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
                     !x <- getSrcEdit ide uri (\lb ->
                         addMissingConstructorImports refactoredTypeNames typeMap .
-                        removeUnprefixFieldsCalls typesDefinedInRewriteFilesNames .
+                        removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
                         replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
                     pure x
