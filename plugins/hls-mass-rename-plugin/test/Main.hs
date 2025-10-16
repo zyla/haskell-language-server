@@ -92,8 +92,15 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     -- Set APPLY=1 to actually modify files
     setEnv "APPLY" "1"
 
-    -- Run mass-rename (binary is in PATH thanks to build-tool-depends)
-    (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe ["mass-rename", "--scan", "src", "--rewrite", "src"] ""
+    -- Discover all .hs files in src except Types8.hs
+    -- Types8.hs should be in --scan but NOT in --rewrite
+    srcFiles <- listDirectory "src"
+    let filesToRewrite = filter (\f -> f /= "Types8.hs" && ".hs" `isSuffixOf` f) srcFiles
+    let rewriteArgs = concatMap (\f -> ["--rewrite", "src" </> f]) filesToRewrite
+
+    -- Run mass-rename with Types8.hs in --scan but not in --rewrite
+    (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
+        (["mass-rename", "--scan", "src"] ++ rewriteArgs) ""
 
     -- Restore directory
     setCurrentDirectory origDir
