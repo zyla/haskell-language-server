@@ -47,6 +47,7 @@ import Data.Hashable (Hashable (hashWithSalt))
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.HashSet as HS
 import Data.List.NonEmpty.Extra (groupWith)
 import Development.IDE.GHC.ExactPrint (GetAnnotatedParsedSource(..))
@@ -259,7 +260,7 @@ replaceFieldAccesses ::
     TypeMap ->
     ParsedSource ->
     ParsedSource
-replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceExpr)
+replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceLocatedExpr `extT` replaceExpr)
     where
     rewriteFieldLabelString = GHC.FieldLabelString . GHC.mkFastString . newName . GHC.unpackFS . GHC.field_label
 
@@ -268,6 +269,48 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceEx
         GHC.Qual x nm -> GHC.Qual x (rewriteOccName newName nm)
         GHC.Orig{} -> error "Orig RdrName should not happen here"
         GHC.Exact{} -> error "Exact RdrName should not happen here"
+
+    replaceLocatedExpr :: GHC.LHsExpr GHC.GhcPs -> GHC.LHsExpr GHC.GhcPs
+    replaceLocatedExpr lexpr@(GHC.L loc expr) = case expr of
+        -- Field projection: (.field) - handle at located level to access location
+        GHC.HsProjection xExt proj_flds ->
+            let debugInfo = case GHC.locA loc of
+                    GHC.RealSrcSpan projLoc _ ->
+                        let typeMapLookup = Map.lookup projLoc typeMap
+                            (typeStr, tyConStr, matches) = case typeMapLookup of
+                                Just (ty:_)
+                                    | Just domainTy <- extractFunctionDomain ty
+                                    , GHC.TyConApp tyCon _ <- domainTy ->
+                                        let tyName = GHC.getName tyCon
+                                            matchesTy = HS.member (HashableName tyName) typesToRefactor
+                                        in (GHC.printWithoutUniques domainTy, GHC.printWithoutUniques tyName, matchesTy)
+                                Just (ty:_) -> (GHC.printWithoutUniques ty, "NO_FUNTY_OR_TYCONAPP", False)
+                                Just [] -> ("EMPTY_LIST", "NO", False)
+                                Nothing -> ("NOT_FOUND", "NO", False)
+                            typeMapStr = if isJust typeMapLookup then "FOUND" else "NOT_FOUND"
+                            matchStr = if matches then "YES" else "NO"
+                        in Just ("FIELD_PROJECTION: " <> GHC.printWithoutUniques projLoc
+                                <> " | TypeMap=" <> typeMapStr
+                                <> " | DomainType=" <> typeStr
+                                <> " | TyConApp=" <> tyConStr
+                                <> " | Match=" <> matchStr)
+                    _ -> Nothing
+                !_ = case debugInfo of
+                    Just msg -> trace msg ()
+                    Nothing -> ()
+               in case GHC.locA loc of
+                    GHC.RealSrcSpan projLoc _
+                        | Just (ty:_) <- Map.lookup projLoc typeMap
+                        , Just domainTy <- extractFunctionDomain ty
+                        , GHC.TyConApp tyCon _ <- domainTy
+                        , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+                        ->
+                            let rewriteDotFieldOcc dfo@(GHC.DotFieldOcc { GHC.dfoLabel = label }) =
+                                    dfo { GHC.dfoLabel = rewriteFieldLabelString <$> label }
+                                updatedFields = NE.map (fmap rewriteDotFieldOcc) proj_flds
+                            in GHC.L loc (GHC.HsProjection xExt updatedFields)
+                    _ -> lexpr
+        _ -> lexpr
 
     replaceExpr :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
     replaceExpr = \case
@@ -361,6 +404,14 @@ getTyConModule (GHC.TyConApp tyCon _) =
         Nothing -> Nothing
 getTyConModule _ = Nothing
 
+-- | Extract the domain (input type) from a function type
+--   For projections like (.field), GHC infers type: RecordType -> FieldType
+extractFunctionDomain :: GHC.Type -> Maybe GHC.Type
+extractFunctionDomain ty = case ty of
+    GHC.FunTy _ argTy _ -> Just argTy
+    GHC.ForAllTy _ innerTy -> extractFunctionDomain innerTy
+    _ -> Nothing
+
 -- | Collect all record types that are used in field accesses in the given ParsedSource
 --   These types will need their constructors to be imported for OverloadedRecordDot to work
 collectFieldAccessTypes :: TypeMap -> ParsedSource -> Set (GHC.ModuleName, GHC.Name)
@@ -372,28 +423,32 @@ collectFieldAccessTypes typeMap ps =
         !_ = trace ("COLLECT_FIELD_ACCESS_TYPES: Extracted " <> show (Set.size result) <> " unique types: " <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList result))) ()
     in result
   where
-    extractType :: GHC.RealSrcSpan -> Maybe (GHC.ModuleName, GHC.Name)
-    extractType srcSpan =
+    extractType :: (GHC.RealSrcSpan, Bool) -> Maybe (GHC.ModuleName, GHC.Name)
+    extractType (srcSpan, isProjection) =
         let lookupResult = Map.lookup srcSpan typeMap
             result = case lookupResult of
                 Nothing -> Nothing
                 Just [] -> Nothing
-                Just (ty:_) -> getTyConModule ty
-            !_ = trace ("COLLECT_SPAN: " <> GHC.printWithoutUniques srcSpan <> " | TypeMap=" <> (if isJust lookupResult then "FOUND" else "NOT_FOUND") <> " | Result=" <> maybe "NONE" (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) result) ()
+                Just (ty:_) ->
+                    if isProjection
+                    then extractFunctionDomain ty >>= getTyConModule
+                    else getTyConModule ty
+            !_ = trace ("COLLECT_SPAN: " <> GHC.printWithoutUniques srcSpan <> (if isProjection then " [PROJECTION]" else "") <> " | TypeMap=" <> (if isJust lookupResult then "FOUND" else "NOT_FOUND") <> " | Result=" <> maybe "NONE" (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) result) ()
         in result
 
-    collectFieldAccesses :: Data a => a -> [GHC.RealSrcSpan]
+    collectFieldAccesses :: Data a => a -> [(GHC.RealSrcSpan, Bool)]
     collectFieldAccesses = everything (++) (mkQ [] getFieldAccessSpan)
 
-    getFieldAccessSpan :: GHC.HsExpr GHC.GhcPs -> [GHC.RealSrcSpan]
-    getFieldAccessSpan = \case
-        -- Field access: r.field
+    getFieldAccessSpan :: GHC.LHsExpr GHC.GhcPs -> [(GHC.RealSrcSpan, Bool)]
+    getFieldAccessSpan (GHC.L loc expr) = case expr of
+        -- Field access: r.field - return span of 'r'
         GHC.HsGetField { GHC.gf_expr = L srcSpan _ }
             | GHC.RealSrcSpan recordExprLoc _ <- GHC.locA srcSpan
-            -> [recordExprLoc]
-        -- Field projection: (.field)
-        GHC.HsProjection { GHC.proj_flds = _ }
-            -> []  -- TODO: handle projections if needed
+            -> [(recordExprLoc, False)]  -- False = not a projection
+        -- Field projection: (.field) - return span of entire projection
+        GHC.HsProjection {}
+            | GHC.RealSrcSpan projLoc _ <- GHC.locA loc
+            -> [(projLoc, True)]  -- True = is a projection
         _ -> []
 
 -- | Extract OccName from IEWrappedName

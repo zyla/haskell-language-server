@@ -30,6 +30,7 @@ library
       UseNewImport
       UseUnrefactoredType
       PrefixedFields
+      FieldProjection
   hs-source-dirs:
       src
   default-extensions:
