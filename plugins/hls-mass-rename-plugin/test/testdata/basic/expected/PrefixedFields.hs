@@ -1,5 +1,6 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -w #-}
 
 module PrefixedFields where
 

@@ -676,7 +676,6 @@ test-suite hls-mass-rename-plugin-tests
     , tasty
     , tasty-hunit
     , temporary
-    , text
 
 
 -----------------------------
