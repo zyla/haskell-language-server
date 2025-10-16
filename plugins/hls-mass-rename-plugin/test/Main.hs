@@ -93,14 +93,14 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     setEnv "APPLY" "1"
 
     -- Discover all .hs files in src except Types8.hs
-    -- Types8.hs should be in --scan but NOT in --rewrite
+    -- Types8.hs should be in --rewrite but NOT in --scan
     srcFiles <- listDirectory "src"
     let filesToRewrite = filter (\f -> f /= "Types8.hs" && ".hs" `isSuffixOf` f) srcFiles
-    let rewriteArgs = concatMap (\f -> ["--rewrite", "src" </> f]) filesToRewrite
+    let rewriteArgs = concatMap (\f -> ["--scan", "src" </> f]) filesToRewrite
 
-    -- Run mass-rename with Types8.hs in --scan but not in --rewrite
+    -- Run mass-rename
     (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
-        (["mass-rename", "--scan", "src"] ++ rewriteArgs) ""
+        (["mass-rename", "--rewrite", "src"] ++ rewriteArgs) ""
 
     -- Restore directory
     setCurrentDirectory origDir
