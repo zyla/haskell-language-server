@@ -17,6 +17,8 @@ library
       Types5Internal
       Types6
       Types6Functions
+      Types7
+      Types7Functions
       Use
       UseSelector
       UseWithConstructor
@@ -26,6 +28,7 @@ library
       UseMultipleConstructors
       UseReexport
       UseNewImport
+      UseUnrefactoredType
       PrefixedFields
   hs-source-dirs:
       src

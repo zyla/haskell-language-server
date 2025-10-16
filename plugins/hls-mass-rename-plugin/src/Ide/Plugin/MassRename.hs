@@ -198,7 +198,7 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                     when (not $ HS.null locations) $
                         liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
                     !x <- getSrcEdit ide uri (\lb ->
-                        addMissingConstructorImports typeMap .
+                        addMissingConstructorImports refactoredTypeNames typeMap .
                         removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
                         replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
@@ -441,10 +441,17 @@ hasConstructorAccess targetModule targetName imports =
 
 -- | Add missing constructor imports to a ParsedSource
 --   This is needed for OverloadedRecordDot to work after renaming fields
-addMissingConstructorImports :: TypeMap -> ParsedSource -> ParsedSource
-addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
+addMissingConstructorImports :: HashSet HashableName -> TypeMap -> ParsedSource -> ParsedSource
+addMissingConstructorImports typesToRefactor typeMap ps@(GHC.L loc hsModule) =
     let accessedTypes = collectFieldAccessTypes typeMap ps
         !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: accessedTypes=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList accessedTypes))) ()
+
+        -- Filter to only types that are being refactored
+        refactoredAccessedTypes = Set.filter
+            (\(_, tyName) -> HashableName tyName `HS.member` typesToRefactor)
+            accessedTypes
+        !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: refactoredAccessedTypes=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList refactoredAccessedTypes))) ()
+
         imports = GHC.hsmodImports hsModule
 
         -- Get current module name to prevent self-imports
@@ -454,7 +461,7 @@ addMissingConstructorImports typeMap ps@(GHC.L loc hsModule) =
         -- Find types that need constructor imports
         typesNeedingImports = Set.filter
             (\(modName, tyName) -> not $ hasConstructorAccess modName tyName imports)
-            accessedTypes
+            refactoredAccessedTypes
         !_ = trace ("ADD_MISSING_CONSTRUCTOR_IMPORTS: typesNeedingImports=" <> show (map (\(m, n) -> GHC.printWithoutUniques m <> "." <> GHC.printWithoutUniques n) (Set.toList typesNeedingImports))) ()
 
         -- Modify imports to add constructors
