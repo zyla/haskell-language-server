@@ -13,7 +13,7 @@ import Types1
 -- use_selector_id r = "R:" <> T.pack (show (_id r))
 
 use_selector :: Restaurant -> Text
-use_selector r = "R:" <> T.pack (show r.slug) <> r.name
+use_selector r = "R:" <> T.pack (show (r.slug)) <> r.name
 
 -- NOTE: doesn't work, creates shadowing conflict
 -- use_selector_shadow :: Restaurant -> Text

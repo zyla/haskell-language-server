@@ -33,6 +33,7 @@ import           Data.List.Extra                          (isPrefixOf, nubOrd,
 import           System.FilePath                          (takeExtension,
                                                            takeFileName, takeDirectory, (</>))
 import qualified Development.IDE.GHC.Compat as GHC
+import qualified GHC.Hs.Expr as GHC (AnnFieldLabel(..), AnnProjection(..))
 import Debug.Trace
 import Control.Monad.Except (runExceptT, ExceptT)
 import Data.Either (fromRight)
@@ -73,7 +74,7 @@ import GHC.Iface.Ext.Types (HieAST(..), NodeInfo(..), SourcedNodeInfo(..), HieAS
 import qualified Data.Map as Map
 import Language.Haskell.Syntax.Basic qualified as GHC
 import GHC.Data.FastString qualified as GHC
-import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed, EpAnn), TrailingAnn(AddCommaAnn), AnnListItem(..), ann, AddEpAnn(..), AnnKeywordId(..), spanAsAnchor, emptyComments)
+import GHC.Parser.Annotation (EpAnn(EpAnnNotUsed, EpAnn), NoEpAnns(..), TrailingAnn(AddCommaAnn), AnnListItem(..), ann, AddEpAnn(..), AnnKeywordId(..), spanAsAnchor, emptyComments)
 import qualified Data.Set as Set
 import Data.Set (Set)
 import Development.IDE.GHC.ExactPrint (setPrecedingLines, epl)
@@ -260,7 +261,10 @@ replaceFieldAccesses ::
     TypeMap ->
     ParsedSource ->
     ParsedSource
-replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceLocatedExpr `extT` replaceExpr)
+replaceFieldAccesses newName typesToRefactor typeMap =
+    everywhere (mkT pass3Located `extT` pass3) .
+    everywhere (mkT pass2Located) .
+    everywhere (mkT pass1Located)
     where
     rewriteFieldLabelString = GHC.FieldLabelString . GHC.mkFastString . newName . GHC.unpackFS . GHC.field_label
 
@@ -270,8 +274,29 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceLo
         GHC.Orig{} -> error "Orig RdrName should not happen here"
         GHC.Exact{} -> error "Exact RdrName should not happen here"
 
-    replaceLocatedExpr :: GHC.LHsExpr GHC.GhcPs -> GHC.LHsExpr GHC.GhcPs
-    replaceLocatedExpr lexpr@(GHC.L loc expr) = case expr of
+    -- Pass 1: Transform applied selectors: field r → r.field
+    pass1Located :: GHC.LHsExpr GHC.GhcPs -> GHC.LHsExpr GHC.GhcPs
+    pass1Located lexpr@(L loc expr) = case expr of
+        GHC.HsApp xApp fun@(L fLoc (GHC.HsVar _ (L _ rdrName))) arg
+            | GHC.RealSrcSpan realSpan _ <- GHC.locA fLoc
+            , Just _ <- isFieldSelectorType typesToRefactor typeMap realSpan
+            -> let fieldName = GHC.occNameString (GHC.rdrNameOcc rdrName)
+               in L loc (makeHsGetField arg fieldName)
+        _ -> lexpr
+
+    -- Pass 2: Transform standalone selectors: field → (.field)
+    pass2Located :: GHC.LHsExpr GHC.GhcPs -> GHC.LHsExpr GHC.GhcPs
+    pass2Located lexpr@(L loc expr) = case expr of
+        GHC.HsVar xVar (L _ rdrName)
+            | GHC.RealSrcSpan realSpan _ <- GHC.locA loc
+            , Just _ <- isFieldSelectorType typesToRefactor typeMap realSpan
+            -> let fieldName = GHC.occNameString (GHC.rdrNameOcc rdrName)
+               in L loc (makeHsProjection fieldName)
+        _ -> lexpr
+
+    -- Pass 3: Existing transformations for HsProjection, HsGetField, RecordUpd
+    pass3Located :: GHC.LHsExpr GHC.GhcPs -> GHC.LHsExpr GHC.GhcPs
+    pass3Located lexpr@(GHC.L loc expr) = case expr of
         -- Field projection: (.field) - handle at located level to access location
         GHC.HsProjection xExt proj_flds ->
             let debugInfo = case GHC.locA loc of
@@ -312,8 +337,8 @@ replaceFieldAccesses newName typesToRefactor typeMap = everywhere (mkT replaceLo
                     _ -> lexpr
         _ -> lexpr
 
-    replaceExpr :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
-    replaceExpr = \case
+    pass3 :: GHC.HsExpr GHC.GhcPs -> GHC.HsExpr GHC.GhcPs
+    pass3 = \case
         x@GHC.HsGetField { GHC.gf_expr = L srcSpan _, GHC.gf_field = L gfSpan gf_field@(GHC.DotFieldOcc { GHC.dfoLabel = label }) }
             -> let
                 debugInfo = case GHC.locA srcSpan of
@@ -411,6 +436,49 @@ extractFunctionDomain ty = case ty of
     GHC.FunTy _ argTy _ -> Just argTy
     GHC.ForAllTy _ innerTy -> extractFunctionDomain innerTy
     _ -> Nothing
+
+-- | Check if a span is a field selector function (based on type information)
+--   Returns the record type if this is a selector for a record type being refactored
+isFieldSelectorType :: HashSet HashableName -> TypeMap -> GHC.RealSrcSpan -> Maybe GHC.Type
+isFieldSelectorType typesToRefactor typeMap srcSpan =
+    case Map.lookup srcSpan typeMap of
+        Just (ty:_)
+            | Just domainTy <- extractFunctionDomain ty
+            , GHC.TyConApp tyCon _ <- domainTy
+            , HS.member (HashableName (GHC.getName tyCon)) typesToRefactor
+            -> Just domainTy
+        _ -> Nothing
+
+-- | Construct a DotFieldOcc AST node from a field name
+makeDotFieldOcc :: String -> GHC.DotFieldOcc GHC.GhcPs
+makeDotFieldOcc fieldName =
+    GHC.DotFieldOcc
+        { GHC.dfoLabel = GHC.noLocA (GHC.FieldLabelString (GHC.mkFastString fieldName))
+        , GHC.dfoExt = EpAnn (spanAsAnchor GHC.noSrcSpan) (GHC.AnnFieldLabel (Just (epl 0))) emptyComments
+        }
+
+-- | Construct HsGetField node for r.field syntax
+makeHsGetField :: GHC.LHsExpr GHC.GhcPs -> String -> GHC.HsExpr GHC.GhcPs
+makeHsGetField recordExpr fieldName =
+    let dotAnn = EpAnn (spanAsAnchor GHC.noSrcSpan) NoEpAnns emptyComments
+        -- Set no preceding space on the record expression to avoid extra whitespace
+        recordExprNoSpace = setPrecedingLines recordExpr 0 0
+    in GHC.HsGetField
+        { GHC.gf_ext = dotAnn
+        , GHC.gf_expr = recordExprNoSpace
+        , GHC.gf_field = GHC.noLocA (makeDotFieldOcc fieldName)
+        }
+
+-- | Construct HsProjection node for (.field) syntax
+makeHsProjection :: String -> GHC.HsExpr GHC.GhcPs
+makeHsProjection fieldName =
+    let projAnn = EpAnn (spanAsAnchor GHC.noSrcSpan)
+                        (GHC.AnnProjection (epl 0) (epl 0))
+                        emptyComments
+    in GHC.HsProjection
+        { GHC.proj_ext = projAnn
+        , GHC.proj_flds = NE.singleton (GHC.noLocA (makeDotFieldOcc fieldName))
+        }
 
 -- | Collect all record types that are used in field accesses in the given ParsedSource
 --   These types will need their constructors to be imported for OverloadedRecordDot to work
