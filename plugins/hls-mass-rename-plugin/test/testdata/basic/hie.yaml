@@ -2,3 +2,5 @@ cradle:
   cabal:
     - path: "src"
       component: "lib:basic"
+    - path: "test"
+      component: "basic:test:basic-tests"

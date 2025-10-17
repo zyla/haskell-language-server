@@ -35,8 +35,8 @@ testInputFilesCompile = withSystemTempDirectory "mass-rename-compile-test" $ \tm
     origDir <- getCurrentDirectory
     setCurrentDirectory tmpDir
 
-    -- Build the test project (should succeed for all exposed modules)
-    (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["build"] ""
+    -- Build and run tests (compiles all components including test-suite)
+    (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
 
     -- Restore directory
     setCurrentDirectory origDir
@@ -86,8 +86,8 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     origDir <- getCurrentDirectory
     setCurrentDirectory tmpDir
 
-    -- Build the test project to generate .hie files
-    _ <- readProcessWithExitCode "cabal" ["build", "--ghc-options=-fwrite-ide-info"] ""
+    -- Build and run tests to generate .hie files (compiles all components including test-suite)
+    _ <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
 
     -- Set APPLY=1 to actually modify files
     setEnv "APPLY" "1"
@@ -96,11 +96,18 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     -- Types8.hs should be in --rewrite but NOT in --scan
     srcFiles <- listDirectory "src"
     let filesToRewrite = filter (\f -> f /= "Types8.hs" && ".hs" `isSuffixOf` f) srcFiles
-    let rewriteArgs = concatMap (\f -> ["--scan", "src" </> f]) filesToRewrite
+    let srcRewriteArgs = concatMap (\f -> ["--scan", "src" </> f]) filesToRewrite
 
-    -- Run mass-rename
+    -- Discover all .hs files in test directory
+    testFiles <- listDirectory "test"
+    let testFilesToRewrite = filter (".hs" `isSuffixOf`) testFiles
+    let testRewriteArgs = concatMap (\f -> ["--scan", "test" </> f]) testFilesToRewrite
+
+    let allRewriteArgs = srcRewriteArgs ++ testRewriteArgs
+
+    -- Run mass-rename on both src and test directories
     (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
-        (["mass-rename", "--rewrite", "src"] ++ rewriteArgs) ""
+        (["mass-rename", "--rewrite", "src", "--rewrite", "test"] ++ allRewriteArgs) ""
 
     -- Restore directory
     setCurrentDirectory origDir
@@ -123,27 +130,35 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
 
     -- Discover all .hs files in src directory
     srcFiles <- listDirectory (tmpDir </> "src")
-    let filesToCheck = filter (".hs" `isSuffixOf`) srcFiles
+    let srcFilesToCheck = filter (".hs" `isSuffixOf`) srcFiles
+
+    -- Discover all .hs files in test directory
+    testFiles <- listDirectory (tmpDir </> "test")
+    let testFilesToCheck = filter (".hs" `isSuffixOf`) testFiles
+
+    -- Check both src and test files
+    let dirsToCheck = [("src", srcFilesToCheck), ("test", testFilesToCheck)]
 
     -- Collect all failures instead of stopping at the first one
-    failures <- fmap concat $ forM filesToCheck $ \file -> do
-        let actualPath = tmpDir </> "src" </> file
-            expectedPath = expectedDir </> file
+    failures <- fmap concat $ forM dirsToCheck $ \(dir, files) -> do
+        fmap concat $ forM files $ \file -> do
+            let actualPath = tmpDir </> dir </> file
+                expectedPath = expectedDir </> dir </> file
 
-        -- Use diff to compare files - shows only differences
-        (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
+            -- Use diff to compare files - shows only differences
+            (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
 
-        case exitCode of
-            ExitSuccess -> pure []  -- Files match
-            _ -> case acceptGolden of
-                Just _ -> do
-                    -- Accept mode: update expected file with actual output
-                    copyFile actualPath expectedPath
-                    putStrLn $ "✓ Accepted golden file: " ++ file
-                    pure []
-                Nothing ->
-                    -- Normal mode: collect diff for reporting
-                    pure ["File " ++ file ++ " differs from expected:\n" ++ diffOutput]
+            case exitCode of
+                ExitSuccess -> pure []  -- Files match
+                _ -> case acceptGolden of
+                    Just _ -> do
+                        -- Accept mode: update expected file with actual output
+                        copyFile actualPath expectedPath
+                        putStrLn $ "✓ Accepted golden file: " ++ dir </> file
+                        pure []
+                    Nothing ->
+                        -- Normal mode: collect diff for reporting
+                        pure ["File " ++ dir </> file ++ " differs from expected:\n" ++ diffOutput]
 
     -- Report all failures at once
     unless (null failures) $
@@ -155,8 +170,8 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir
     -- Clean build artifacts to force recompilation of transformed files
     _ <- readProcessWithExitCode "rm" ["-rf", "dist-newstyle"] ""
 
-    -- Build the transformed project
-    (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["build"] ""
+    -- Build and run tests on transformed project (all components including test-suite)
+    (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["test"] ""
 
     -- Restore directory
     setCurrentDirectory origDir
