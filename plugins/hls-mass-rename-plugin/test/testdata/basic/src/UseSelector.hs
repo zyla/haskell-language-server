@@ -18,3 +18,10 @@ use_selector r = "R:" <> T.pack (show (_slug r)) <> _name r
 -- NOTE: doesn't work, creates shadowing conflict
 -- use_selector_shadow :: Restaurant -> Text
 -- use_selector_shadow r = let name = "foo" in _name r <> name
+
+-- Standalone field selector usage (should transform to (.field) syntax)
+getNames :: [Restaurant] -> [Text]
+getNames = map _name
+
+getSlugs :: [Restaurant] -> [Text]
+getSlugs restaurants = map _slug restaurants

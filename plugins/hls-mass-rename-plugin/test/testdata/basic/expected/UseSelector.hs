@@ -13,8 +13,15 @@ import Types1
 -- use_selector_id r = "R:" <> T.pack (show (_id r))
 
 use_selector :: Restaurant -> Text
-use_selector r = "R:" <> T.pack (show (slug r)) <> name r
+use_selector r = "R:" <> T.pack (show r.slug) <> r.name
 
 -- NOTE: doesn't work, creates shadowing conflict
 -- use_selector_shadow :: Restaurant -> Text
 -- use_selector_shadow r = let name = "foo" in _name r <> name
+
+-- Standalone field selector usage (should transform to (.field) syntax)
+getNames :: [Restaurant] -> [Text]
+getNames = map (.name)
+
+getSlugs :: [Restaurant] -> [Text]
+getSlugs restaurants = map (.slug) restaurants
