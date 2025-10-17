@@ -147,6 +147,7 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                         liftIO $ putStrLn $ "Found datatype " <> GHC.printWithoutUniques tr.module_ <> "." <> GHC.printWithoutUniques tr.name <> " with fields " <> show (GHC.printWithoutUniques <$> tr.fieldNames)
                         pure $ (nfp,) <$> tr.fieldNames
 
+
             -- Find references across all loaded HIE ASTs directly (bypassing HieDb)
             let refsAtNameInAsts :: GHC.Name -> [Location]
                 refsAtNameInAsts name = concatMap (Rename.nameLocs name) loadedHieAsts
@@ -203,7 +204,7 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                         addMissingConstructorImports refactoredTypeNames typeMap .
                         removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
-                        replaceFieldAccesses stripLensPrefix refactoredTypeNames typeMap)
+                        replaceFieldAccesses stripLensPrefix refactoredTypeNames refs typeMap)
                     pure x
 
             allEdits <- mapM getFileEdit (Map.toList typeMaps)
@@ -258,10 +259,11 @@ data Mode = Default | InRecordField deriving (Eq, Show)
 replaceFieldAccesses ::
     (String -> String) ->
     HashSet HashableName -> -- ^ names of record types to refactor
+    HashSet Location ->     -- ^ locations of field selectors being renamed
     TypeMap ->
     ParsedSource ->
     ParsedSource
-replaceFieldAccesses newName typesToRefactor typeMap =
+replaceFieldAccesses newName typesToRefactor fieldSelectorRefs typeMap =
     everywhere (mkT pass3Located `extT` pass3) .
     everywhere (mkT pass2Located) .
     everywhere (mkT pass1Located)
@@ -279,6 +281,8 @@ replaceFieldAccesses newName typesToRefactor typeMap =
     pass1Located lexpr@(L loc expr) = case expr of
         GHC.HsApp xApp fun@(L fLoc (GHC.HsVar _ (L _ rdrName))) arg
             | GHC.RealSrcSpan realSpan _ <- GHC.locA fLoc
+            , Just location <- srcSpanToLocation (GHC.locA fLoc)
+            , HS.member location fieldSelectorRefs
             , Just _ <- isFieldSelectorType typesToRefactor typeMap realSpan
             -> let fieldName = GHC.occNameString (GHC.rdrNameOcc rdrName)
                in L loc (makeHsGetField arg fieldName)
@@ -289,6 +293,8 @@ replaceFieldAccesses newName typesToRefactor typeMap =
     pass2Located lexpr@(L loc expr) = case expr of
         GHC.HsVar xVar (L _ rdrName)
             | GHC.RealSrcSpan realSpan _ <- GHC.locA loc
+            , Just location <- srcSpanToLocation (GHC.locA loc)
+            , HS.member location fieldSelectorRefs
             , Just _ <- isFieldSelectorType typesToRefactor typeMap realSpan
             -> let fieldName = GHC.occNameString (GHC.rdrNameOcc rdrName)
                in L loc (makeHsProjection fieldName)

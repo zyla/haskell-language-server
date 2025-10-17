@@ -25,3 +25,9 @@ getNames = map _name
 
 getSlugs :: [Restaurant] -> [Text]
 getSlugs restaurants = map _slug restaurants
+
+dontRewrite :: Restaurant -> Text
+dontRewrite r = "R:" <> foo r
+
+foo :: Restaurant -> Text
+foo _ = ""
