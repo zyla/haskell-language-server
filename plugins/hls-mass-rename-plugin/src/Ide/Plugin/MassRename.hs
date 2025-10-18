@@ -80,6 +80,7 @@ import Data.Set (Set)
 import Development.IDE.GHC.ExactPrint (setPrecedingLines, epl)
 import Control.Lens (_last, over)
 import GHC.Types.PkgQual (RawPkgQual(NoRawPkgQual))
+import System.Exit (exitFailure)
 
 descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
@@ -120,17 +121,17 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                 let typeMap = Map.fromListWith (<>) $ map (fmap (:[])) $ foldMap nodeTypes $ Map.elems $ getAsts hieAst
                 pure (nfp, typeMap)
             (nfp, _) -> do
-                -- Warn but don't error - file might not have HIE info
-                putStrLn $ "Warning: No fresh HIE for " ++ show nfp ++ ", using empty typeMap"
-                pure (nfp, mempty)
+                putStrLn $ "Error: No fresh HIE for " ++ show nfp
+                exitFailure
 
         -- Get ModIfaces for scan files to determine which types to refactor
         let scanNfps = map toNormalizedFilePath' absoluteScanFiles
         allResults <- runAction "GetModIface" ide $ uses GetModIface scanNfps
         let scanResults = zip allResults absoluteScanFiles
         let (succeeded, failed) = partition (isJust . fst) scanResults
-        unless (null failed) $
+        unless (null failed) $ do
             putStr $ unlines $ "Files that failed to get ModIface:" : map ((++) " * " . snd) failed
+            exitFailure
 
         let state = ide
 
