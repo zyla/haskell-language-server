@@ -989,6 +989,22 @@ findTypesToRefactor HiFileResult{hirModIface=modIface} =
                     , name = nm
                     , fieldNames
                     }
+            GHC.IfaceData { GHC.ifName = nm, GHC.ifCons = GHC.IfNewTyCon constructor } -> do
+                -- Newtypes have a single constructor
+                let fieldNames = map GHC.flSelector (GHC.ifConFields constructor)
+
+                let hasLensPrefix fieldName =
+                        case fieldNameToString fieldName of
+                            '_' : _ -> True
+                            _ -> False
+
+                guard (not $ null fieldNames)
+                guard (all hasLensPrefix fieldNames)
+                pure TypeToRefactor
+                    { module_ = GHC.moduleName $ GHC.mi_module modIface
+                    , name = nm
+                    , fieldNames
+                    }
             _ -> Nothing
 
 fieldNameToString :: GHC.Name -> String

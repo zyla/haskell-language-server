@@ -8,6 +8,7 @@ import qualified Data.Text as T
 
 import Types1
 import Types2
+import Types9
 
 use :: Restaurant -> Text
 use Restaurant{name = nm, slug = s} = "R:" <> nm <> s
@@ -72,3 +73,19 @@ use_NamedFieldPuns_shadow2 :: Restaurant -> Text
 use_NamedFieldPuns_shadow2 =
     let name = "foo"
     in \Restaurant{name} -> name <> name
+
+-- Newtype usage tests
+use_newtype_pattern :: UserId -> Int
+use_newtype_pattern UserId{unUserId} = unUserId
+
+use_newtype_dot :: UserId -> Int
+use_newtype_dot uid = uid.unUserId
+
+use_newtype_construct :: Int -> UserId
+use_newtype_construct n = UserId { unUserId = n }
+
+use_newtype_update :: Int -> UserId -> UserId
+use_newtype_update n uid = uid { unUserId = n }
+
+use_accountname_dot :: AccountName -> Text
+use_accountname_dot acc = acc.unAccountName
