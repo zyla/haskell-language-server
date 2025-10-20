@@ -72,115 +72,123 @@ copyDirectory src dst = do
 
 -- | Integration test that runs mass-rename and verifies output
 testMassRenameIntegration :: IO ()
-testMassRenameIntegration = withSystemTempDirectory "mass-rename-test" $ \tmpDir -> do
-    let testDataDir = "plugins/hls-mass-rename-plugin/test/testdata/basic"
-        expectedDir = testDataDir </> "expected"
+testMassRenameIntegration = withSystemTempDirectory "mass-rename-source" $ \sourceDir ->
+    withSystemTempDirectory "mass-rename-target" $ \targetDir -> do
+        let testDataDir = "plugins/hls-mass-rename-plugin/test/testdata/basic"
+            expectedDir = testDataDir </> "expected"
 
-    -- Get HLS executable path (build-tool-depends ensures it's in PATH)
-    hlsExe <- fromMaybe "haskell-language-server" <$> lookupEnv "HLS_TEST_EXE"
+        -- Get HLS executable path (build-tool-depends ensures it's in PATH)
+        hlsExe <- fromMaybe "haskell-language-server" <$> lookupEnv "HLS_TEST_EXE"
 
-    -- Copy test project to temp directory
-    copyDirectory testDataDir tmpDir
+        -- Copy test project to SOURCE directory and build it
+        copyDirectory testDataDir sourceDir
 
-    -- Save current directory and change to temp
-    origDir <- getCurrentDirectory
-    setCurrentDirectory tmpDir
+        -- Save current directory
+        origDir <- getCurrentDirectory
 
-    -- Build and run tests to generate .hie files (compiles all components including test-suite)
-    _ <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
+        -- Build source directory to generate HIE files
+        setCurrentDirectory sourceDir
+        _ <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
+        setCurrentDirectory origDir
 
-    -- Set APPLY=1 to actually modify files
-    setEnv "APPLY" "1"
+        -- Copy test project to TARGET directory (pristine, no build)
+        copyDirectory testDataDir targetDir
 
-    -- Discover all .hs files in src except Types8.hs
-    -- Types8.hs should be in --rewrite but NOT in --scan
-    srcFiles <- listDirectory "src"
-    let filesToRewrite = filter (\f -> f /= "Types8.hs" && ".hs" `isSuffixOf` f) srcFiles
-    let srcRewriteArgs = concatMap (\f -> ["--scan", "src" </> f]) filesToRewrite
+        -- Set APPLY=1 to actually modify files
+        setEnv "APPLY" "1"
 
-    -- Discover all .hs files in test directory
-    testFiles <- listDirectory "test"
-    let testFilesToRewrite = filter (".hs" `isSuffixOf`) testFiles
-    let testRewriteArgs = concatMap (\f -> ["--scan", "test" </> f]) testFilesToRewrite
+        -- Discover all .hs files in src except Types8.hs
+        -- Types8.hs should be in --rewrite but NOT in --scan
+        srcFiles <- listDirectory (sourceDir </> "src")
+        let filesToRewrite = filter (\f -> f /= "Types8.hs" && ".hs" `isSuffixOf` f) srcFiles
+        let srcRewriteArgs = concatMap (\f -> ["--scan", "src" </> f]) filesToRewrite
 
-    let allRewriteArgs = srcRewriteArgs ++ testRewriteArgs
+        -- Discover all .hs files in test directory
+        testFiles <- listDirectory (sourceDir </> "test")
+        let testFilesToRewrite = filter (".hs" `isSuffixOf`) testFiles
+        let testRewriteArgs = concatMap (\f -> ["--scan", "test" </> f]) testFilesToRewrite
 
-    -- Run mass-rename on both src and test directories
-    (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
-        (["mass-rename", "--rewrite", "src", "--rewrite", "test"] ++ allRewriteArgs) ""
+        let allRewriteArgs = srcRewriteArgs ++ testRewriteArgs
 
-    -- Restore directory
-    setCurrentDirectory origDir
+        -- Run mass-rename from source directory with separate target directory
+        setCurrentDirectory sourceDir
+        (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
+            (["mass-rename",
+              "--source-dir", sourceDir,
+              "--target-dir", targetDir,
+              "--rewrite", "src",
+              "--rewrite", "test"] ++ allRewriteArgs) ""
+        setCurrentDirectory origDir
 
-    -- Print stderr for debugging
-    putStrLn "=== mass-rename stderr ==="
-    putStrLn stderr
-    putStrLn "==========================="
+        -- Print stderr for debugging
+        putStrLn "=== mass-rename stderr ==="
+        putStrLn stderr
+        putStrLn "==========================="
 
-    -- Check exit code
-    case exitCode of
-        ExitSuccess -> pure ()
-        ExitFailure code -> assertFailure $
-            "mass-rename failed with exit code " ++ show code ++
-            "\nStdout: " ++ stdout ++
-            "\nStderr: " ++ stderr
+        -- Check exit code
+        case exitCode of
+            ExitSuccess -> pure ()
+            ExitFailure code -> assertFailure $
+                "mass-rename failed with exit code " ++ show code ++
+                "\nStdout: " ++ stdout ++
+                "\nStderr: " ++ stderr
 
-    -- Check if we should accept golden files (update expected outputs)
-    acceptGolden <- lookupEnv "ACCEPT"
+        -- Check if we should accept golden files (update expected outputs)
+        acceptGolden <- lookupEnv "ACCEPT"
 
-    -- Discover all .hs files in src directory
-    srcFiles <- listDirectory (tmpDir </> "src")
-    let srcFilesToCheck = filter (".hs" `isSuffixOf`) srcFiles
+        -- Discover all .hs files in target src directory
+        srcFiles <- listDirectory (targetDir </> "src")
+        let srcFilesToCheck = filter (".hs" `isSuffixOf`) srcFiles
 
-    -- Discover all .hs files in test directory
-    testFiles <- listDirectory (tmpDir </> "test")
-    let testFilesToCheck = filter (".hs" `isSuffixOf`) testFiles
+        -- Discover all .hs files in target test directory
+        testFiles <- listDirectory (targetDir </> "test")
+        let testFilesToCheck = filter (".hs" `isSuffixOf`) testFiles
 
-    -- Check both src and test files
-    let dirsToCheck = [("src", srcFilesToCheck), ("test", testFilesToCheck)]
+        -- Check both src and test files in TARGET directory
+        let dirsToCheck = [("src", srcFilesToCheck), ("test", testFilesToCheck)]
 
-    -- Collect all failures instead of stopping at the first one
-    failures <- fmap concat $ forM dirsToCheck $ \(dir, files) -> do
-        fmap concat $ forM files $ \file -> do
-            let actualPath = tmpDir </> dir </> file
-                expectedPath = expectedDir </> dir </> file
+        -- Collect all failures instead of stopping at the first one
+        failures <- fmap concat $ forM dirsToCheck $ \(dir, files) -> do
+            fmap concat $ forM files $ \file -> do
+                let actualPath = targetDir </> dir </> file
+                    expectedPath = expectedDir </> dir </> file
 
-            -- Use diff to compare files - shows only differences
-            (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
+                -- Use diff to compare files - shows only differences
+                (exitCode, diffOutput, _) <- readProcessWithExitCode "diff" ["-u", expectedPath, actualPath] ""
 
-            case exitCode of
-                ExitSuccess -> pure []  -- Files match
-                _ -> case acceptGolden of
-                    Just _ -> do
-                        -- Accept mode: update expected file with actual output
-                        copyFile actualPath expectedPath
-                        putStrLn $ "✓ Accepted golden file: " ++ dir </> file
-                        pure []
-                    Nothing ->
-                        -- Normal mode: collect diff for reporting
-                        pure ["File " ++ dir </> file ++ " differs from expected:\n" ++ diffOutput]
+                case exitCode of
+                    ExitSuccess -> pure []  -- Files match
+                    _ -> case acceptGolden of
+                        Just _ -> do
+                            -- Accept mode: update expected file with actual output
+                            copyFile actualPath expectedPath
+                            putStrLn $ "✓ Accepted golden file: " ++ dir </> file
+                            pure []
+                        Nothing ->
+                            -- Normal mode: collect diff for reporting
+                            pure ["File " ++ dir </> file ++ " differs from expected:\n" ++ diffOutput]
 
-    -- Report all failures at once
-    unless (null failures) $
-        assertFailure $ unlines failures
+        -- Report all failures at once
+        unless (null failures) $
+            assertFailure $ unlines failures
 
-    -- Verify transformed files compile
-    setCurrentDirectory tmpDir
+        -- Verify transformed files compile in TARGET directory
+        setCurrentDirectory targetDir
 
-    -- Clean build artifacts to force recompilation of transformed files
-    _ <- readProcessWithExitCode "rm" ["-rf", "dist-newstyle"] ""
+        -- Clean build artifacts to force recompilation of transformed files
+        _ <- readProcessWithExitCode "rm" ["-rf", "dist-newstyle"] ""
 
-    -- Build and run tests on transformed project (all components including test-suite)
-    (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["test"] ""
+        -- Build and run tests on transformed project (all components including test-suite)
+        (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["test"] ""
 
-    -- Restore directory
-    setCurrentDirectory origDir
+        -- Restore directory
+        setCurrentDirectory origDir
 
-    -- Check that build succeeded
-    case buildExitCode of
-        ExitSuccess -> pure ()
-        ExitFailure code -> assertFailure $
-            "Transformed files failed to compile (exit code " ++ show code ++ ")\n" ++
-            "This indicates the transformation produced invalid Haskell code.\n" ++
-            "Stdout: " ++ buildStdout ++ "\n" ++
-            "Stderr: " ++ buildStderr
+        -- Check that build succeeded
+        case buildExitCode of
+            ExitSuccess -> pure ()
+            ExitFailure code -> assertFailure $
+                "Transformed files failed to compile (exit code " ++ show code ++ ")\n" ++
+                "This indicates the transformation produced invalid Haskell code.\n" ++
+                "Stdout: " ++ buildStdout ++ "\n" ++
+                "Stderr: " ++ buildStderr

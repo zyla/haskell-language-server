@@ -90,13 +90,49 @@ descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $
 
 type TypeMap = Map.Map GHC.RealSrcSpan [GHC.Type]
 
+-- | Map a file path from source directory to target directory
+-- Given source-dir=/workspace/tree1, target-dir=/workspace/tree2, and path=/workspace/tree1/src/Types.hs
+-- Returns /workspace/tree2/src/Types.hs
+mapSourceToTarget :: FilePath -> FilePath -> FilePath -> Maybe FilePath
+mapSourceToTarget sourceDir targetDir sourcePath =
+    case stripPrefix (sourceDir ++ "/") sourcePath of
+        Just relativePath -> Just (targetDir </> relativePath)
+        Nothing ->
+            -- Try without trailing slash in case sourcePath == sourceDir
+            if sourcePath == sourceDir
+                then Just targetDir
+                else Nothing
+  where
+    stripPrefix prefix str =
+        if prefix `isPrefixOf` str
+            then Just (drop (length prefix) str)
+            else Nothing
+
 exampleCli :: ParserInfo (IdeCommand IdeState)
 exampleCli = info (IdeCommand . go <$> parser) mempty
     where
-    parser = (,)
+    parser = (,,,)
         <$> some (strOption (long "scan" <> metavar "FILES/DIRS" <> help "Files/directories to scan for datatypes with lens-prefixed fields"))
         <*> some (strOption (long "rewrite" <> metavar "FILES/DIRS" <> help "Files/directories to rewrite"))
-    go (scanArgs, rewriteArgs) ide = do
+        <*> optional (strOption (long "source-dir" <> metavar "DIR" <> help "Source directory for analysis (where HIE files are)"))
+        <*> optional (strOption (long "target-dir" <> metavar "DIR" <> help "Target directory for modifications (where edits are written)"))
+    go (scanArgs, rewriteArgs, mSourceDir, mTargetDir) ide = do
+        -- Validate that both source-dir and target-dir are provided together or neither
+        case (mSourceDir, mTargetDir) of
+            (Just _, Nothing) -> error "--source-dir requires --target-dir"
+            (Nothing, Just _) -> error "--target-dir requires --source-dir"
+            _ -> pure ()
+
+        -- Canonicalize source and target directories if provided
+        dirMapping <- case (mSourceDir, mTargetDir) of
+            (Just sourceDir, Just targetDir) -> do
+                absSourceDir <- IO.canonicalizePath sourceDir
+                absTargetDir <- IO.canonicalizePath targetDir
+                putStrLn $ "Source directory: " ++ absSourceDir
+                putStrLn $ "Target directory: " ++ absTargetDir
+                pure $ Just (absSourceDir, absTargetDir)
+            _ -> pure Nothing
+
         -- Scan files: user-provided paths (to determine which types to refactor)
         scanFiles <- expandFiles scanArgs
         absoluteScanFiles <- nubOrd <$> mapM IO.canonicalizePath scanFiles
@@ -219,7 +255,16 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
             when shouldApply do
                 forM_ allEdits \edit -> do
                     nfp <- getNormalizedFilePathE edit.uri
-                    liftIO $ T.writeFile (fromNormalizedFilePath nfp) edit.after
+                    let sourcePath = fromNormalizedFilePath nfp
+                    targetPath <- case dirMapping of
+                        Just (sourceDir, targetDir) ->
+                            case mapSourceToTarget sourceDir targetDir sourcePath of
+                                Just path -> pure path
+                                Nothing -> error $ "File " ++ sourcePath ++ " is not under source directory " ++ sourceDir
+                        Nothing -> pure sourcePath
+                    -- Create parent directory in target if needed
+                    liftIO $ IO.createDirectoryIfMissing True (takeDirectory targetPath)
+                    liftIO $ T.writeFile targetPath edit.after
 
 rewriteOccName :: (String -> String) -> OccName -> OccName
 rewriteOccName fn = mkTcOcc . fn . GHC.occNameString
