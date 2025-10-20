@@ -145,7 +145,6 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
 
         -- Build HIE ASTs for all rewrite files
         let allNfps = map toNormalizedFilePath' absoluteRewriteFiles
-        setFilesOfInterest ide $ HashMap.fromList $ map (,OnDisk) allNfps
 
         asts <- runAction "GetHieAst" ide $ uses GetHieAst allNfps
         -- Keep all loaded HIE ASTs for cross-file reference search
