@@ -159,6 +159,10 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                 putStrLn $ "Error: No fresh HIE for " ++ show nfp
                 exitFailure
 
+        -- Create cache map for HIE ASTs to avoid redundant GetHieAst calls
+        let hieAstMap :: Map.Map NormalizedFilePath HieAstResult
+            hieAstMap = Map.fromList [(nfp, har) | (nfp, Just har) <- zip allNfps asts]
+
         -- Get ModIfaces for scan files to determine which types to refactor
         let scanNfps = map toNormalizedFilePath' absoluteScanFiles
         allResults <- runAction "GetModIface" ide $ uses GetModIface scanNfps
@@ -236,7 +240,11 @@ exampleCli = info (IdeCommand . go <$> parser) mempty
                     let locations = fromMaybe HS.empty $ Map.lookup uri refsMap
                     when (not $ HS.null locations) $
                         liftIO $ putStrLn $ T.unpack (getUri uri) <> ": " <> show (ppLoc <$> HS.toList locations)
-                    !x <- getSrcEdit ide uri (\lb ->
+                    -- Look up the cached HieAstResult
+                    har <- case Map.lookup nfp hieAstMap of
+                        Just h -> pure h
+                        Nothing -> error $ "Missing HieAstResult for " ++ show nfp
+                    !x <- getSrcEdit ide uri har (\lb ->
                         addMissingConstructorImports refactoredTypeNames typeMap .
                         removeUnprefixFieldsCalls refactoredTypeNames .
                         replaceRefs newName locations lb .
@@ -984,25 +992,27 @@ getSrcEdit ::
     MonadIO m =>
     IdeState ->
     Uri ->
+    HieAstResult ->
     (LocalBindings.Bindings -> ParsedSource -> ParsedSource) ->
     ExceptT PluginError m FileEdit
-getSrcEdit state uri updatePs = do
+getSrcEdit state uri har updatePs = do
     nfp <- getNormalizedFilePathE uri
     annAst <- runActionE "Rename.GetAnnotatedParsedSource" state
         (useE GetAnnotatedParsedSource nfp)
-    HAR{refMap=originalRefMap, hieKind} <- runActionE "Rename.GetHieAst" state $ useE GetHieAst nfp
-    let refMap =
-            case hieKind of
-                HieFromDisk{} -> [] <$ originalRefMap
-                HieFresh{} -> originalRefMap
-    let ps = annAst
-        src = T.pack $ exactPrint ps
-        res = T.pack $ exactPrint (updatePs (LocalBindings.bindings refMap) ps)
-    pure $ FileEdit
-        { uri = uri
-        , before = src
-        , after = res
-        }
+    case har of
+        HAR{refMap=originalRefMap, hieKind} -> do
+            let refMap =
+                    case hieKind of
+                        HieFromDisk{} -> [] <$ originalRefMap
+                        HieFresh{} -> originalRefMap
+            let ps = annAst
+                src = T.pack $ exactPrint ps
+                res = T.pack $ exactPrint (updatePs (LocalBindings.bindings refMap) ps)
+            pure $ FileEdit
+                { uri = uri
+                , before = src
+                , after = res
+                }
 
 withPrevious :: [a] -> [(Maybe a, a)]
 withPrevious xs = zip (Nothing : map Just xs) xs
