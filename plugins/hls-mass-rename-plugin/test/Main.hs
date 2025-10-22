@@ -5,12 +5,12 @@ module Main (main) where
 import Control.Monad (forM, forM_, unless)
 import Data.List (isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, getCurrentDirectory, setCurrentDirectory, copyPermissions)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, copyPermissions, makeAbsolute)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
-import System.Process (readProcessWithExitCode)
+import System.Process (readProcessWithExitCode, proc, CreateProcess(..), readCreateProcessWithExitCode)
 import Test.Tasty (defaultMain, testGroup, TestTree)
 import Test.Tasty.HUnit (testCase, assertFailure)
 
@@ -26,20 +26,14 @@ tests = testGroup "MassRename CLI Tests"
 -- | Test that input files compile successfully
 testInputFilesCompile :: IO ()
 testInputFilesCompile = withSystemTempDirectory "mass-rename-compile-test" $ \tmpDir -> do
-    let testDataDir = "plugins/hls-mass-rename-plugin/test/testdata/basic"
+    testDataDir <- makeAbsolute "plugins/hls-mass-rename-plugin/test/testdata/basic"
 
     -- Copy test project to temp directory
     copyDirectory testDataDir tmpDir
 
-    -- Save current directory and change to temp
-    origDir <- getCurrentDirectory
-    setCurrentDirectory tmpDir
-
     -- Build and run tests (compiles all components including test-suite)
-    (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
-
-    -- Restore directory
-    setCurrentDirectory origDir
+    let process = (proc "cabal" ["test", "--ghc-options=-fwrite-ide-info"]) { cwd = Just tmpDir }
+    (exitCode, stdout, stderr) <- readCreateProcessWithExitCode process ""
 
     -- Check that build succeeded
     case exitCode of
@@ -74,8 +68,8 @@ copyDirectory src dst = do
 testMassRenameIntegration :: IO ()
 testMassRenameIntegration = withSystemTempDirectory "mass-rename-source" $ \sourceDir ->
     withSystemTempDirectory "mass-rename-target" $ \targetDir -> do
-        let testDataDir = "plugins/hls-mass-rename-plugin/test/testdata/basic"
-            expectedDir = testDataDir </> "expected"
+        testDataDir <- makeAbsolute "plugins/hls-mass-rename-plugin/test/testdata/basic"
+        let expectedDir = testDataDir </> "expected"
 
         -- Get HLS executable path (build-tool-depends ensures it's in PATH)
         hlsExe <- fromMaybe "haskell-language-server" <$> lookupEnv "HLS_TEST_EXE"
@@ -83,13 +77,9 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-source" $ \sour
         -- Copy test project to SOURCE directory and build it
         copyDirectory testDataDir sourceDir
 
-        -- Save current directory
-        origDir <- getCurrentDirectory
-
         -- Build source directory to generate HIE files
-        setCurrentDirectory sourceDir
-        _ <- readProcessWithExitCode "cabal" ["test", "--ghc-options=-fwrite-ide-info"] ""
-        setCurrentDirectory origDir
+        let buildProcess = (proc "cabal" ["test", "--ghc-options=-fwrite-ide-info"]) { cwd = Just sourceDir }
+        _ <- readCreateProcessWithExitCode buildProcess ""
 
         -- Copy test project to TARGET directory (pristine, no build)
         copyDirectory testDataDir targetDir
@@ -111,14 +101,13 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-source" $ \sour
         let allRewriteArgs = srcRewriteArgs ++ testRewriteArgs
 
         -- Run mass-rename from source directory with separate target directory
-        setCurrentDirectory sourceDir
-        (exitCode, stdout, stderr) <- readProcessWithExitCode hlsExe
-            (["mass-rename",
-              "--source-dir", sourceDir,
-              "--target-dir", targetDir,
-              "--rewrite", "src",
-              "--rewrite", "test"] ++ allRewriteArgs) ""
-        setCurrentDirectory origDir
+        let renameProcess = (proc hlsExe
+                (["mass-rename",
+                  "--source-dir", sourceDir,
+                  "--target-dir", targetDir,
+                  "--rewrite", "src",
+                  "--rewrite", "test"] ++ allRewriteArgs)) { cwd = Just sourceDir }
+        (exitCode, stdout, stderr) <- readCreateProcessWithExitCode renameProcess ""
 
         -- Print stderr for debugging
         putStrLn "=== mass-rename stderr ==="
@@ -173,16 +162,13 @@ testMassRenameIntegration = withSystemTempDirectory "mass-rename-source" $ \sour
             assertFailure $ unlines failures
 
         -- Verify transformed files compile in TARGET directory
-        setCurrentDirectory targetDir
-
         -- Clean build artifacts to force recompilation of transformed files
-        _ <- readProcessWithExitCode "rm" ["-rf", "dist-newstyle"] ""
+        let cleanProcess = (proc "rm" ["-rf", "dist-newstyle"]) { cwd = Just targetDir }
+        _ <- readCreateProcessWithExitCode cleanProcess ""
 
         -- Build and run tests on transformed project (all components including test-suite)
-        (buildExitCode, buildStdout, buildStderr) <- readProcessWithExitCode "cabal" ["test"] ""
-
-        -- Restore directory
-        setCurrentDirectory origDir
+        let testProcess = (proc "cabal" ["test"]) { cwd = Just targetDir }
+        (buildExitCode, buildStdout, buildStderr) <- readCreateProcessWithExitCode testProcess ""
 
         -- Check that build succeeded
         case buildExitCode of
